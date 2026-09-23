@@ -113,6 +113,18 @@ struct TReadRequestContext
 
 ////////////////////////////////////////////////////////////////////////////////
 
+struct TEvStartReadData final
+    : public TEventLocal<TEvStartReadData, TEvServicePrivate::EvStartReadData>
+{
+    TReadRequestContext Context;
+
+    TEvStartReadData(TReadRequestContext&& context)
+        : Context(std::move(context))
+    {}
+};
+
+////////////////////////////////////////////////////////////////////////////////
+
 class TReadDataActor final: public TActorBootstrapped<TReadDataActor>
 {
 private:
@@ -142,6 +154,8 @@ private:
     // holding this IntrusivePtr to guarantee that MainInFlightRequest is not
     // deallocated
     const TInFlightRequestStoragePtr InFlightRequests;
+    // Empty for one-shot actors and when shutting down.
+    TActorId ServiceActorId;
 
     std::optional<TRequestState> RequestState;
 
@@ -149,7 +163,8 @@ public:
     TReadDataActor(
         IProfileLogPtr profileLog,
         ITraceSerializerPtr traceSerializer,
-        TInFlightRequestStoragePtr inFlightRequests);
+        TInFlightRequestStoragePtr inFlightRequests,
+        TActorId serviceActorId);
 
     void Initialize(TReadRequestContext params);
 
@@ -220,10 +235,12 @@ TReadDataActor::TRequestState::TRequestState(TReadRequestContext params)
 TReadDataActor::TReadDataActor(
     IProfileLogPtr profileLog,
     ITraceSerializerPtr traceSerializer,
-    TInFlightRequestStoragePtr inFlightRequests)
+    TInFlightRequestStoragePtr inFlightRequests,
+    TActorId serviceActorId)
     : ProfileLog(std::move(profileLog))
     , TraceSerializer(std::move(traceSerializer))
     , InFlightRequests(std::move(inFlightRequests))
+    , ServiceActorId(serviceActorId)
 {}
 
 void TReadDataActor::Initialize(TReadRequestContext params)
@@ -751,6 +768,8 @@ void TReadDataActor::HandlePoisonPill(
     const TActorContext& ctx)
 {
     Y_UNUSED(ev);
+    // A poisoned actor must terminate instead of returning to the pool.
+    ServiceActorId = {};
     if (!RequestState) {
         Die(ctx);
         return;
@@ -1094,7 +1113,15 @@ void TReadDataActor::SendResponseAndDie(
         0 /* flags */,
         state.RequestContext.Cookie);
 
-    Die(ctx);
+    if (ServiceActorId) {
+        RequestState.reset();
+        Become(&TThis::StateIdle);
+        NCloud::Send<TEvServicePrivate::TEvReleaseReadDataActor>(
+            ctx,
+            ServiceActorId);
+    } else {
+        Die(ctx);
+    }
 }
 
 void TReadDataActor::HandleError(
@@ -1113,6 +1140,12 @@ STFUNC(TReadDataActor::StateIdle)
     switch (ev->GetTypeRewrite()) {
         HFunc(TEvStartReadData, HandleStartReadData);
         HFunc(TEvents::TEvPoisonPill, HandlePoisonPill);
+
+        // Ignore responses left over from a completed request while idle.
+        case TEvIndexTablet::TEvDescribeDataResponse::EventType:
+        case TEvService::TEvReadDataResponse::EventType:
+        case TEvBlobStorage::TEvGetResult::EventType:
+            break;
 
         default:
             HandleUnexpectedEvent(
@@ -1148,6 +1181,34 @@ STFUNC(TReadDataActor::StateWork)
 }   // namespace
 
 ////////////////////////////////////////////////////////////////////////////////
+
+TReadDataActorPool::TReadDataActorPool(
+    IProfileLogPtr profileLog,
+    ITraceSerializerPtr traceSerializer,
+    TInFlightRequestStoragePtr inFlightRequests)
+    : TWorkerActorPool(
+          [profileLog = std::move(profileLog),
+           traceSerializer = std::move(traceSerializer),
+           inFlightRequests = std::move(inFlightRequests)](
+              const TActorContext& ctx)
+          {
+              return NCloud::Register<TReadDataActor>(
+                  ctx,
+                  profileLog,
+                  traceSerializer,
+                  inFlightRequests,
+                  ctx.SelfID);
+          })
+{}
+
+////////////////////////////////////////////////////////////////////////////////
+
+void TStorageServiceActor::HandleReleaseReadDataActor(
+    const TEvServicePrivate::TEvReleaseReadDataActor::TPtr& ev,
+    const TActorContext&)
+{
+    ReadDataActorPool.ReleaseActor(ev->Sender);
+}
 
 void TStorageServiceActor::HandleReadData(
     const TEvService::TEvReadDataRequest::TPtr& ev,
@@ -1262,11 +1323,7 @@ void TStorageServiceActor::HandleReadData(
         filestore.GetFeatures().GetZeroCopyReadEnabled() &&
         !msg->Record.GetIovecs().empty();
 
-    auto actor = std::make_unique<TReadDataActor>(
-        ProfileLog,
-        TraceSerializer,
-        InFlightRequests);
-    actor->Initialize(TReadRequestContext(
+    TReadRequestContext context(
         std::move(msg->Record),
         filestore.GetFileSystemId(),
         filestore.GetBlockSize(),
@@ -1286,9 +1343,23 @@ void TStorageServiceActor::HandleReadData(
         // with ExternalReadDataPayload
         filestore.GetFeatures().GetUseCustomReadDataResponseParser() &&
             !filestore.GetFeatures().GetExternalReadDataPayload(),
-        zeroCopyReadEnabled));
+        zeroCopyReadEnabled);
 
-    NCloud::Register(ctx, std::move(actor));
+    if (StorageConfig->GetEnablePreallocatedDataActors()) {
+        auto request = std::make_unique<TEvStartReadData>(std::move(context));
+        NCloud::Send(
+            ctx,
+            ReadDataActorPool.GetOrCreateActor(ctx),
+            std::move(request));
+    } else {
+        auto actor = std::make_unique<TReadDataActor>(
+            ProfileLog,
+            TraceSerializer,
+            InFlightRequests,
+            ctx.SelfID);
+        actor->Initialize(std::move(context));
+        NCloud::Register(ctx, std::move(actor));
+    }
 }
 
 }   // namespace NCloud::NFileStore::NStorage

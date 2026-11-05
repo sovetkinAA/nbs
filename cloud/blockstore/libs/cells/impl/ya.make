@@ -24,11 +24,10 @@ PEERDIR(
     cloud/blockstore/libs/diagnostics
     cloud/blockstore/libs/kikimr
     cloud/blockstore/libs/service
-
+    cloud/blockstore/libs/icv2/iface
     cloud/storage/core/libs/actors
     cloud/storage/core/libs/grpc
     cloud/storage/core/libs/rdma/impl
-
     contrib/ydb/core/base
     contrib/ydb/core/mon
     contrib/ydb/library/actors/core
@@ -41,4 +40,6 @@ PEERDIR(
 
 END()
 
-RECURSE_FOR_TESTS(ut)
+RECURSE_FOR_TESTS(
+    ut
+)

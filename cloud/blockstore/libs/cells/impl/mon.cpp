@@ -7,6 +7,7 @@
 
 #include <cloud/storage/core/libs/actors/helpers.h>
 #include <cloud/storage/core/libs/common/error.h>
+#include <cloud/storage/core/libs/common/format.h>
 
 #include <contrib/ydb/core/base/appdata.h>
 #include <contrib/ydb/core/mon/mon.h>
@@ -258,6 +259,8 @@ TString DescribeTransport(
     switch (transport) {
         case NProto::CELL_DATA_TRANSPORT_GRPC:
             return "grpc";
+        case NProto::CELL_DATA_TRANSPORT_ICV2:
+            return "icv2";
         case NProto::CELL_DATA_TRANSPORT_RDMA:
             return grpcDataFallbackEnabled ? "rdma + grpc fallback" : "rdma";
         default:
@@ -333,6 +336,7 @@ void RenderCell(
                     TABLEH() { out << "gRPC"; }
                     TABLEH() { out << "Secure gRPC"; }
                     TABLEH() { out << "RDMA"; }
+                    TABLEH() { out << "IC V2"; }
                 }
             }
             TABLEBODY() {
@@ -378,6 +382,9 @@ void RenderCell(
                             out << FormatPort(host.GetSecureGrpcPort());
                         }
                         TABLED() { out << FormatPort(host.GetRdmaPort()); }
+                        TABLED() {
+                            out << FormatPort(host.GetIcV2Port());
+                        }
                     }
                 }
             }
@@ -433,8 +440,9 @@ void RenderTransportControl(IOutputStream& out, const TCellMountStatus& mount)
         << "<select name='Transport' class='form-control input-sm'>";
     constexpr std::array transports = {
         NProto::CELL_DATA_TRANSPORT_GRPC,
-        NProto::CELL_DATA_TRANSPORT_RDMA};
-    constexpr std::array names = {"gRPC", "RDMA"};
+        NProto::CELL_DATA_TRANSPORT_RDMA,
+        NProto::CELL_DATA_TRANSPORT_ICV2};
+    constexpr std::array names = {"gRPC", "RDMA", "IC V2"};
     for (size_t i = 0; i < transports.size(); ++i) {
         out << "<option value='"
             << NProto::ECellDataTransport_Name(transports[i]) << "'";
@@ -463,7 +471,9 @@ void RenderMounts(
            "disk/client "
            "on this node until the connection closes. RDMA keeps its "
            "configured "
-           "gRPC fallback policy.</p>";
+           "gRPC fallback policy. The transport badge shows the selected "
+           "route; the IC V2 channel column shows its live TCP state. "
+           "Idle means no connection has been attempted yet.</p>";
     if (mounts.empty()) {
         out << "<p class='text-muted'>None.</p>";
         return;
@@ -478,6 +488,8 @@ void RenderMounts(
                     TABLEH() { out << "Cell"; }
                     TABLEH() { out << "Host"; }
                     TABLEH() { out << "Transport"; }
+                    TABLEH() { out << "IC V2 channel"; }
+                    TABLEH() { out << "I/O (current transport)"; }
                     TABLEH() { out << "Tablet"; }
                 }
             }
@@ -502,6 +514,35 @@ void RenderMounts(
                                 TransportLabelKind(mount.DataTransport),
                                 mount.DataTransport);
                             RenderTransportControl(out, mount);
+                        }
+                        TABLED() {
+                            if (mount.IcV2ChannelState) {
+                                const TStringBuf kind =
+                                    mount.IcV2ChannelState == "connected"
+                                        ? "success"
+                                        : mount.IcV2ChannelState == "disconnected"
+                                              ? "warning"
+                                              : "default";
+                                RenderLabel(
+                                    out,
+                                    kind,
+                                    mount.IcV2ChannelState);
+                                out << " <small>attempts: "
+                                    << mount.IcV2ConnectionAttempts
+                                    << ", failures: "
+                                    << mount.IcV2ConnectionFailures
+                                    << "</small>";
+                            }
+                        }
+                        TABLED() {
+                            out << "R: " << mount.ReadRequests
+                                << "/" << mount.ReadErrors
+                                << " (" << FormatByteSize(mount.ReadBytes)
+                                << ")<br>W: " << mount.WriteRequests
+                                << "/" << mount.WriteErrors
+                                << " (" << FormatByteSize(mount.WriteBytes)
+                                << ")<br>Z: " << mount.ZeroRequests
+                                << "/" << mount.ZeroErrors;
                         }
                         TABLED () {
                             // empty when the cell is older than the field
@@ -676,7 +717,8 @@ private:
                 params.Get("Transport"),
                 &transport) ||
             (transport != NProto::CELL_DATA_TRANSPORT_GRPC &&
-             transport != NProto::CELL_DATA_TRANSPORT_RDMA) ||
+             transport != NProto::CELL_DATA_TRANSPORT_RDMA &&
+             transport != NProto::CELL_DATA_TRANSPORT_ICV2) ||
             params.Get("ConnectionId").empty())
         {
             ReplyTransportChanged(
@@ -685,7 +727,7 @@ private:
                 ev->Cookie,
                 MakeError(
                     E_ARGUMENT,
-                    "Expected POST with connection and gRPC/RDMA "
+                    "Expected POST with connection and gRPC/RDMA/IC V2 "
                     "transport"));
             return;
         }

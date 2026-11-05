@@ -7,6 +7,7 @@
 
 #include <cloud/blockstore/libs/client/client.h>
 #include <cloud/blockstore/libs/client/config.h>
+#include <cloud/blockstore/libs/icv2/iface/data_endpoint_factory.h>
 #include <cloud/blockstore/libs/service/service.h>
 #include <cloud/blockstore/libs/service/service_method.h>
 
@@ -76,7 +77,7 @@ struct THostBinding
     IDetachableTargetPtr Sink;
 
     // only without a fallback: there is no switcher to hold it
-    NCloud::NStorage::NRdma::IClientEndpointHandlerPtr RdmaHandler;
+    NCloud::IClientEndpointHandlerPtr RdmaHandler;
 };
 using THostBindingPtr = std::shared_ptr<THostBinding>;
 
@@ -99,7 +100,7 @@ void NoteMount(
 
 void NoteUnmount(TCellConnection& connection, const TString& diskId);
 
-// The selected data route.
+// The selected data route; IC V2 connection liveness is reported separately.
 TString DescribeDataTransport(
     const THostBinding& binding,
     const ITransportSwitcherPtr& switcher)
@@ -108,6 +109,8 @@ TString DescribeDataTransport(
     switch (hostConfig.GetTransport()) {
         case NProto::CELL_DATA_TRANSPORT_GRPC:
             return "grpc";
+        case NProto::CELL_DATA_TRANSPORT_ICV2:
+            return "icv2";
         case NProto::CELL_DATA_TRANSPORT_RDMA:
             // until the switcher is in, the data goes the fallback way
             if (hostConfig.GetGrpcDataFallbackEnabled() &&
@@ -121,6 +124,21 @@ TString DescribeDataTransport(
     }
 }
 
+TStringBuf DescribeIcV2ChannelState(NIcV2::EHostChannelState state)
+{
+    switch (state) {
+        case NIcV2::EHostChannelState::Idle:
+            return "idle";
+        case NIcV2::EHostChannelState::Connecting:
+            return "connecting";
+        case NIcV2::EHostChannelState::Connected:
+            return "connected";
+        case NIcV2::EHostChannelState::Disconnected:
+            return "disconnected";
+    }
+    return "unknown";
+}
+
 TResultOrError<ITransportSwitcherPtr> PrepareBindingTransportSwitching(
     const TBootstrap& bootstrap,
     const THostBinding& binding)
@@ -129,8 +147,8 @@ TResultOrError<ITransportSwitcherPtr> PrepareBindingTransportSwitching(
     return PrepareTransportSwitching(
         binding.Sink,
         binding.DataEndpoint,
-        [bootstrap, hostConfig]
-        (NCloud::NStorage::NRdma::IClientEndpointHandlerPtr handler)
+        [bootstrap, hostConfig]   //
+        (NCloud::IClientEndpointHandlerPtr handler)
         {
             return bootstrap.EndpointsSetup->SetupHostRdmaEndpoint(
                 bootstrap,
@@ -140,7 +158,8 @@ TResultOrError<ITransportSwitcherPtr> PrepareBindingTransportSwitching(
         bootstrap.Timer,
         bootstrap.Scheduler,
         bootstrap.Logging,
-        hostConfig.GetFqdn(),
+        TStringBuilder() << "RDMA " << hostConfig.GetFqdn() << ":"
+                         << hostConfig.GetRdmaPort(),
         TTransportSwitcherConfig{
             .SettleTime = hostConfig.GetRdmaSettleTime(),
         });
@@ -439,13 +458,33 @@ public:
         status.SelectedTransport = binding->HostConfig.GetTransport();
         status.ConnectionId = ConnectionId;
         status.CanSelectRdma = binding->HostConfig.GetGrpcDataFallbackEnabled();
+        const auto io = DataRouter->GetIoStats();
+        status.ReadRequests = io.ReadRequests;
+        status.ReadErrors = io.ReadErrors;
+        status.ReadBytes = io.ReadBytes;
+        status.WriteRequests = io.WriteRequests;
+        status.WriteErrors = io.WriteErrors;
+        status.WriteBytes = io.WriteBytes;
+        status.ZeroRequests = io.ZeroRequests;
+        status.ZeroErrors = io.ZeroErrors;
+        if (status.SelectedTransport == NProto::CELL_DATA_TRANSPORT_ICV2 &&
+            Bootstrap.IcV2EndpointFactory)
+        {
+            const auto channel =
+                Bootstrap.IcV2EndpointFactory->GetDataEndpointStatus(
+                    binding->DataEndpoint);
+            status.IcV2ChannelState = DescribeIcV2ChannelState(channel.State);
+            status.IcV2ConnectionAttempts = channel.ConnectionAttempts;
+            status.IcV2ConnectionFailures = channel.ConnectionFailures;
+        }
         return status;
     }
 
     NProto::TError SwitchDataTransport(NProto::ECellDataTransport transport)
     {
         if (transport != NProto::CELL_DATA_TRANSPORT_GRPC &&
-            transport != NProto::CELL_DATA_TRANSPORT_RDMA)
+            transport != NProto::CELL_DATA_TRANSPORT_RDMA &&
+            transport != NProto::CELL_DATA_TRANSPORT_ICV2)
         {
             return MakeError(E_ARGUMENT, "Unsupported cell data transport");
         }
@@ -470,7 +509,7 @@ public:
                     "Manual RDMA selection requires gRPC data fallback");
             }
             if (Binding->HostConfig.GetTransport() == transport &&
-                (transport == NProto::CELL_DATA_TRANSPORT_GRPC ||
+                (transport != NProto::CELL_DATA_TRANSPORT_RDMA ||
                  Binding->Switcher))
             {
                 TransportOverride = transport;
@@ -612,6 +651,11 @@ public:
         }
 
         RunPendingMoveAway();
+    }
+
+    void OnIcV2Disconnected(ui64 generation) noexcept
+    {
+        Y_UNUSED(generation);
     }
 
     // Without a fallback this host serves nothing at all while its rdma is
@@ -790,6 +834,8 @@ public:
     }
 
 private:
+    NProto::TError PrepareDataEndpoint(const THostBindingPtr& binding);
+
     TResultOrError<THostBindingPtr> PrepareTransportChange(
         const THostBinding& old,
         NProto::ECellDataTransport transport)
@@ -798,7 +844,9 @@ private:
         config.SetTransport(transport);
         const bool hasGrpcDataEndpoint =
             old.HostConfig.GetTransport() == NProto::CELL_DATA_TRANSPORT_GRPC ||
-            old.HostConfig.GetGrpcDataFallbackEnabled();
+            (old.HostConfig.GetTransport() ==
+                 NProto::CELL_DATA_TRANSPORT_RDMA &&
+             old.HostConfig.GetGrpcDataFallbackEnabled());
         auto built = BuildHostBinding(
             Bootstrap,
             config,
@@ -813,6 +861,10 @@ private:
         binding->Generation = ReserveGeneration();
         binding->ControlGeneration = old.ControlGeneration;
         binding->BoundControlService = old.BoundControlService;
+        const auto error = PrepareDataEndpoint(binding);
+        if (HasError(error)) {
+            return error;
+        }
         if (transport != NProto::CELL_DATA_TRANSPORT_RDMA) {
             return binding;
         }
@@ -1220,11 +1272,35 @@ public:
 
 ////////////////////////////////////////////////////////////////////////////////
 
+class TIcV2Handler final: public NCloud::IClientEndpointHandler
+{
+    const std::weak_ptr<TCellConnection> Connection;
+    const ui64 Generation;
+
+public:
+    TIcV2Handler(std::weak_ptr<TCellConnection> connection, ui64 generation)
+        : Connection(std::move(connection))
+        , Generation(generation)
+    {}
+
+    void HandleConnected() noexcept override
+    {}
+
+    void HandleUnavailable() noexcept override
+    {}
+
+    void HandleDisconnected() noexcept override
+    {
+        if (auto connection = Connection.lock()) {
+            connection->OnIcV2Disconnected(Generation);
+        }
+    }
+};
+
 // The only listener an rdma endpoint gets when there is no fallback: with no
 // second transport to fall back to, the one thing worth reacting to is the
 // link never coming up.
-class TRdmaOnlyHandler final
-    : public NCloud::NStorage::NRdma::IClientEndpointHandler
+class TRdmaOnlyHandler final: public NCloud::IClientEndpointHandler
 {
 private:
     const std::weak_ptr<TCellConnection> Connection;
@@ -1276,7 +1352,27 @@ NProto::TError TCellConnection::PrepareDataPath(
         weak_from_this(),
         binding->ControlGeneration);
 
+    return PrepareDataEndpoint(binding);
+}
+
+NProto::TError TCellConnection::PrepareDataEndpoint(
+    const THostBindingPtr& binding)
+{
     const auto& hostConfig = binding->HostConfig;
+    if (hostConfig.GetTransport() == NProto::CELL_DATA_TRANSPORT_ICV2) {
+        auto [endpoint, error] =
+            Bootstrap.EndpointsSetup->SetupHostIcV2Endpoint(
+                Bootstrap,
+                hostConfig,
+                std::make_shared<TIcV2Handler>(
+                    weak_from_this(),
+                    binding->Generation));
+        if (HasError(error)) {
+            return error;
+        }
+        binding->DataEndpoint = std::move(endpoint);
+        return {};
+    }
     const bool rdmaOnly =
         hostConfig.GetTransport() == NProto::CELL_DATA_TRANSPORT_RDMA &&
         !hostConfig.GetGrpcDataFallbackEnabled();
@@ -1369,7 +1465,7 @@ IBlockStorePtr CreateGrpcDataEndpoint(
 
 // Builds everything that ties a connection to one host, EXCEPT the data path
 // - that is TCellConnection::PrepareDataPath, which needs a live connection
-// to hand the rdma client a handler.
+// to hand the data endpoint a handler.
 TResultOrError<THostBindingPtr> BuildHostBinding(
     const TBootstrap& bootstrap,
     const TCellHostConfig& hostConfig,
@@ -1381,6 +1477,9 @@ TResultOrError<THostBindingPtr> BuildHostBinding(
     binding->ControlService = controlService;
 
     switch (hostConfig.GetTransport()) {
+        case NProto::CELL_DATA_TRANSPORT_ICV2:
+            return binding;
+
         case NProto::CELL_DATA_TRANSPORT_RDMA:
             if (!hostConfig.GetGrpcDataFallbackEnabled()) {
                 return binding;
@@ -1546,7 +1645,7 @@ TCellConnectionFuture CreateCellConnection(
                 std::move(dataRouter),
                 built.GetResult());
 
-            // The RDMA handler needs the connection to exist first.
+            // IC V2 and RDMA handlers need the connection to exist first.
             auto error = connection->PrepareDataPath(built.GetResult());
             if (HasError(error)) {
                 // no explicit release here, unlike the branches above: the

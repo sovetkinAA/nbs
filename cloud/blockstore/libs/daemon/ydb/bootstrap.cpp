@@ -1164,6 +1164,7 @@ void TBootstrapYdb::SetupCellManager()
             ServerStats,
             std::move(cellCertProvider),
             RdmaClient,
+            IcV2Service,
             Service);
     } else {
         CellManager = NCells::CreateCellManagerStub(Service);

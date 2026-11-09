@@ -24,6 +24,9 @@
 
 #include <library/cpp/testing/unittest/registar.h>
 
+#include <util/generic/scope.h>
+#include <util/system/mutex.h>
+
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/resource.h>
@@ -365,14 +368,17 @@ Y_UNIT_TEST_SUITE(TIcV2ServiceTest)
             return;
         }
         for (bool checksums: {false, true}) {
+            TMutex storedMutex;
+            TString stored(8192, 'x');
             TFixture first;
             TFixture second;
-            TString stored(8192, 'x');
             second.DataService->WriteBlocksLocalHandler = [&](auto request)
             {
                 UNIT_ASSERT_VALUES_EQUAL(request->GetDiskId(), "disk");
                 auto guard = request->Sglist.Acquire();
                 UNIT_ASSERT(guard);
+
+                TGuard<TMutex> lock(storedMutex);
                 SgListCopy(guard.Get(), {stored.Detach(), stored.size()});
                 return NThreading::MakeFuture<
                     NProto::TWriteBlocksLocalResponse>();
@@ -381,6 +387,8 @@ Y_UNIT_TEST_SUITE(TIcV2ServiceTest)
             {
                 auto guard = request->Sglist.Acquire();
                 UNIT_ASSERT(guard);
+
+                TGuard<TMutex> lock(storedMutex);
                 SgListCopy({stored.data(), stored.size()}, guard.Get());
                 return NThreading::MakeFuture<
                     NProto::TReadBlocksLocalResponse>();
@@ -388,6 +396,8 @@ Y_UNIT_TEST_SUITE(TIcV2ServiceTest)
             second.DataService->ZeroBlocksHandler = [&](auto request)
             {
                 UNIT_ASSERT_VALUES_EQUAL(request->GetBlocksCount(), 2);
+
+                TGuard<TMutex> lock(storedMutex);
                 stored = TString(8192, '\0');
                 return NThreading::MakeFuture<NProto::TZeroBlocksResponse>();
             };
@@ -409,7 +419,10 @@ Y_UNIT_TEST_SUITE(TIcV2ServiceTest)
             UNIT_ASSERT_C(
                 !HasError(written.GetValue()),
                 FormatError(written.GetValue().GetError()));
-            UNIT_ASSERT_VALUES_EQUAL(stored, data);
+            {
+                TGuard<TMutex> lock(storedMutex);
+                UNIT_ASSERT_VALUES_EQUAL(stored, data);
+            }
             auto read = std::make_shared<NProto::TReadBlocksLocalRequest>();
             read->SetDiskId("disk");
             read->SetBlockSize(4096);
@@ -418,6 +431,10 @@ Y_UNIT_TEST_SUITE(TIcV2ServiceTest)
             TString received(8192, 'r');
             read->Sglist =
                 TGuardedSgList({{received.Detach(), received.size()}});
+            Y_DEFER
+            {
+                read->Sglist.Close();
+            };
             auto response =
                 endpoint->ReadBlocksLocal(MakeIntrusive<TCallContext>(), read);
             UNIT_ASSERT(response.Wait(TDuration::Seconds(5)));
@@ -435,7 +452,10 @@ Y_UNIT_TEST_SUITE(TIcV2ServiceTest)
             UNIT_ASSERT_C(
                 !HasError(zeroed.GetValue()),
                 FormatError(zeroed.GetValue().GetError()));
-            UNIT_ASSERT_VALUES_EQUAL(stored, TString(8192, '\0'));
+            {
+                TGuard<TMutex> lock(storedMutex);
+                UNIT_ASSERT_VALUES_EQUAL(stored, TString(8192, '\0'));
+            }
             first.Service->Stop();
             auto rejected =
                 endpoint->ZeroBlocks(MakeIntrusive<TCallContext>(), zero);
@@ -984,6 +1004,19 @@ Y_UNIT_TEST_SUITE(TIcV2ServiceTest)
         if (!IsAvailable()) {
             return;
         }
+
+        // Initialize UBSan vptr checks before exhausting descriptors.
+        Y_UNUSED(FormatError(MakeError(MAKE_SYSTEM_ERROR(EMFILE), "accept")));
+        {
+            TFixture warmup;
+            warmup.Start();
+            warmup.ConnectChannel(false);
+            WaitCounter(
+                warmup.Counters->GetCounter("ActiveConnections", false),
+                1);
+            warmup.Service->RequestStop();
+        }
+
         TFixture fixture;
         fixture.Start();
         fixture.ConnectChannel(false);

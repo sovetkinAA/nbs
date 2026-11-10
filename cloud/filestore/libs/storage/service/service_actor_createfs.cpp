@@ -526,22 +526,6 @@ void TCreateFileStoreActor::HandleShardCreationStateResponse(
         return;
     }
 
-    if (shardCreationState.GetVersion() <
-        ShardCreationState.GetShardCreationStateVersion())
-    {
-        // A newer response has already advanced the local shard creation state.
-        // Ignoring this stale reply is intentional: progress has already been
-        // made, so returning here does not stall the operation.
-        return;
-    }
-
-    if (auto error = ShardCreationState.ValidateTarget(shardCreationState);
-        HasError(error))
-    {
-        ReplyAndDie(ctx, error);
-        return;
-    }
-
     const auto mergeResult =
         ShardCreationState.MergeShardCreationState(shardCreationState);
     if (HasError(mergeResult)) {
@@ -549,15 +533,21 @@ void TCreateFileStoreActor::HandleShardCreationStateResponse(
         return;
     }
 
-    if (mergeResult.GetResult()) {
-        // Concurrent updates can race on the state version, leaving local
-        // creation bits absent from the returned persistent bitmap. The
-        // companion retries the CAS update with the merged bitmap and the
-        // returned version so these bits are persisted before configuration.
-        // It sends a new request whose response will resume processing, so
-        // returning here does not stall the operation.
-        ShardCreationState.UpdateShardCreationState(ctx);
-        return;
+    switch (mergeResult.GetResult()) {
+        case TShardCreationStateCompanion::EMergeAction::IgnoreStaleResponse:
+            // A newer state is already recorded locally. Intentionally discard
+            // this stale response; it cannot advance the operation.
+            return;
+
+        case TShardCreationStateCompanion::EMergeAction::PersistLocalProgress:
+            // Concurrent updates can race on the state version, leaving local
+            // creation bits absent from the returned persistent bitmap. Retry
+            // the CAS update before configuring shards.
+            ShardCreationState.UpdateShardCreationState(ctx);
+            return;
+
+        case TShardCreationStateCompanion::EMergeAction::Continue:
+            break;
     }
 
     if (ShardsToCreate == 0 && !ShardConfigurationStarted) {

@@ -12,6 +12,7 @@ PEERDIR(
     cloud/blockstore/libs/cells/iface
     cloud/blockstore/libs/client
     cloud/blockstore/libs/icv2/data
+    cloud/blockstore/libs/icv2/iface
     cloud/blockstore/libs/icv2/transport
     cloud/storage/core/libs/icv2/request_channel
     cloud/blockstore/libs/service

@@ -3,7 +3,7 @@
 #include <cloud/blockstore/libs/cells/iface/cell_manager.h>
 #include <cloud/blockstore/libs/client/public.h>
 #include <cloud/blockstore/libs/diagnostics/public.h>
-#include <cloud/blockstore/libs/icv2/service/public.h>
+#include <cloud/blockstore/libs/icv2/iface/public.h>
 #include <cloud/blockstore/libs/service/public.h>
 #include <cloud/blockstore/libs/service/service.h>
 
@@ -24,6 +24,7 @@ ICellManagerPtr CreateCellManager(
     IServerStatsPtr serverStats,
     ICertificateProviderPtr certificateProvider,
     NCloud::NStorage::NRdma::IClientPtr rdmaClient,
-    NIcV2::IServicePtr icV2Service, IBlockStorePtr localService);
+    NIcV2::IDataEndpointFactoryPtr icV2EndpointFactory,
+    IBlockStorePtr localService);
 
 }   // namespace NCloud::NBlockStore::NCells

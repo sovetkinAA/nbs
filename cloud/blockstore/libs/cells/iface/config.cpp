@@ -148,6 +148,11 @@ TCellHostConfig::TCellHostConfig(
 {
 }
 
+const TString& TCellHostConfig::GetCellId() const
+{
+    return CellId;
+}
+
 void TCellHostConfig::SetTransport(NProto::ECellDataTransport transport)
 {
     Transport = transport;

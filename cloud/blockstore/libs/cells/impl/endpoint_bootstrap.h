@@ -5,7 +5,7 @@
 #include <cloud/blockstore/libs/cells/iface/config.h>
 #include <cloud/blockstore/libs/client/config.h>
 #include <cloud/blockstore/libs/client_rdma/rdma_client.h>
-#include <cloud/blockstore/libs/icv2/service/public.h>
+#include <cloud/blockstore/libs/icv2/iface/public.h>
 
 namespace NCloud::NBlockStore::NCells {
 

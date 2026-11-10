@@ -3,6 +3,7 @@
 #include "public.h"
 
 #include <cloud/blockstore/libs/cells/iface/public.h>
+#include <cloud/blockstore/libs/icv2/iface/host_connection.h>
 
 #include <cloud/storage/core/libs/icv2/handshake/handshake.h>
 #include <cloud/storage/core/libs/icv2/request_channel/request_channel.h>
@@ -20,29 +21,6 @@ using TChannelResult = TResultOrError<NCloud::NIcV2::IRequestChannelPtr>;
 using TChannelFuture = NThreading::TFuture<TChannelResult>;
 using TChannelFactory =
     std::function<TChannelResult(const NCloud::NIcV2::THandshakeReady&)>;
-
-enum class EHostChannelState
-{
-    Idle,
-    Connecting,
-    Connected,
-    Disconnected,
-};
-
-struct THostChannelStatus
-{
-    EHostChannelState State = EHostChannelState::Idle;
-    ui64 ConnectionAttempts = 0;
-    ui64 ConnectionFailures = 0;
-};
-
-// Receives notifications when an established connection closes.
-// Do not call Stop from the notification.
-struct IHostConnectionHandler
-{
-    virtual ~IHostConnectionHandler() = default;
-    virtual void HandleDisconnected() noexcept = 0;
-};
 
 // Internal outgoing-channel cache. The factory must return a prepared channel;
 // the cache installs its close handler before activating it.

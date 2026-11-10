@@ -402,8 +402,9 @@ Y_UNIT_TEST_SUITE(TIcV2ServiceTest)
                 return NThreading::MakeFuture<NProto::TZeroBlocksResponse>();
             };
             StartPair(first, second, checksums);
+            IDataEndpointFactoryPtr factory = first.Service;
             auto [endpoint, error] =
-                first.Service->CreateDataEndpoint("cell-2", "127.0.0.1", {});
+                factory->CreateDataEndpoint("cell-2", "127.0.0.1", {});
             UNIT_ASSERT_C(!HasError(error), FormatError(error));
             TString data(8192, 'w');
             auto write = std::make_shared<NProto::TWriteBlocksLocalRequest>();
@@ -456,6 +457,9 @@ Y_UNIT_TEST_SUITE(TIcV2ServiceTest)
                 TGuard<TMutex> lock(storedMutex);
                 UNIT_ASSERT_VALUES_EQUAL(stored, TString(8192, '\0'));
             }
+            UNIT_ASSERT(
+                factory->GetDataEndpointStatus(endpoint).State ==
+                EHostChannelState::Connected);
             first.Service->Stop();
             auto rejected =
                 endpoint->ZeroBlocks(MakeIntrusive<TCallContext>(), zero);

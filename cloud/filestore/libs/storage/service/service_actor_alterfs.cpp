@@ -429,93 +429,36 @@ void TAlterFileStoreActor::HandleShardCreationStateResponse(
     const TEvIndexTablet::TEvUnsafeChangeTabletStateResponse::TPtr& ev,
     const TActorContext& ctx)
 {
-    auto* msg = ev->Get();
-    if (HasError(msg->GetError())) {
-        const auto* action =
-            ShardCreationState.IsPersistentStateLoaded() ? "update" : "read";
-        const auto message =
-            Sprintf("failed to %s shard creation state", action);
-        ReplyAndDie(ctx, MakeError(E_REJECTED, message));
+    const auto result = ShardCreationState.HandleResponse(ev->Get()->Record);
+    if (HasError(result)) {
+        ReplyAndDie(ctx, result.GetError());
         return;
     }
 
-    if (!msg->Record.HasShardCreationState()) {
-        if (!ShardCreationState.IsPersistentStateLoaded()) {
-            // Rolling upgrade compatibility: the filesystem's old IndexTablet
-            // accepts UnsafeChangeTabletState but does not return
-            // ShardCreationState yet. Fallback to preexisting non-persistent
-            // resize flow.
-            LOG_WARN(
-                ctx,
-                TFileStoreComponents::SERVICE,
-                "[%s] UnsafeChangeTabletState returned no shard creation "
-                "state, continuing without persistent shard creation state",
-                FileSystemId.c_str());
-
-            ShardCreationState.MarkPersistentStateUnsupported();
+    using EAction = TShardCreationStateCompanion::EResponseAction;
+    switch (result.GetResult()) {
+        case EAction::StartWithoutPersistentState:
+            ShardCreationState.LogPersistentStateUnsupported(ctx);
             GetStorageStats(ctx);
-        } else if (ShardCreationState.IsPersistentStateSupported()) {
-            ReportShardCreationStateResponseMissing(
-                TStringBuilder() << "Filesystem " << FileSystemId.Quote()
-                                 << ": response is missing shard creation state"
-                                 << " after persistent state support was confirmed");
-            ReplyAndDie(
-                ctx,
-                MakeError(
-                    E_REJECTED,
-                    "shard creation state response is missing"));
-        } else {
-            ReportShardCreationStateResponseMissing(
-                TStringBuilder() << "Filesystem " << FileSystemId.Quote()
-                                 << ": unexpected response without shard creation"
-                                 << " state after switching to non-persistent flow");
-        }
+            return;
 
-        return;
-    }
+        case EAction::InitialStateLoaded:
+            GetStorageStats(ctx);
+            return;
 
-    const auto& shardCreationState = msg->Record.GetShardCreationState();
-    if (!ShardCreationState.IsPersistentStateLoaded()) {
-        ShardCreationState.SetShardCreationState(shardCreationState);
-        GetStorageStats(ctx);
-        return;
-    }
-
-    if (!ShardCreationState.HasCreatedShardBitmap()) {
-        // The initial read is complete, and updates are only sent after the
-        // topology response initializes the bitmap. Another state response
-        // before bitmap initialization is therefore unexpected.
-        ReportShardCreationBitmapMissing(
-            TStringBuilder() << "Filesystem " << FileSystemId.Quote()
-                             << ": shard creation state response received"
-                             << " without an initialized shard bitmap");
-        ReplyAndDie(
-            ctx,
-            MakeError(E_INVALID_STATE, "shard creation bitmap is not initialized"));
-        return;
-    }
-
-    const auto mergeResult =
-        ShardCreationState.MergeShardCreationState(shardCreationState);
-    if (HasError(mergeResult)) {
-        ReplyAndDie(ctx, mergeResult.GetError());
-        return;
-    }
-
-    switch (mergeResult.GetResult()) {
-        case TShardCreationStateCompanion::EMergeAction::IgnoreStaleResponse:
+        case EAction::IgnoreStaleResponse:
             // A newer state is already recorded locally. Intentionally discard
             // this stale response; it cannot advance the operation.
             return;
 
-        case TShardCreationStateCompanion::EMergeAction::PersistLocalProgress:
+        case EAction::PersistLocalProgress:
             // Concurrent updates can race on the state version, leaving local
             // creation bits absent from the returned persistent bitmap. Retry
             // the CAS update before configuring shards.
             ShardCreationState.UpdateShardCreationState(ctx);
             return;
 
-        case TShardCreationStateCompanion::EMergeAction::Continue:
+        case EAction::Continue:
             break;
     }
 

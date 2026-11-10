@@ -1,3 +1,5 @@
+#include <cloud/fastshard/libs/bootstrap/core.h>
+#include <cloud/fastshard/libs/common/context.h>
 #include <cloud/fastshard/libs/sn/client/client.h>
 #include <cloud/fastshard/libs/sn/iface/storage_node.h>
 #include <cloud/fastshard/libs/sn/server/server.h>
@@ -6,7 +8,6 @@
 
 #include <silk/fibers/fiber.h>
 #include <silk/fibers/future.h>
-#include <silk/util/init.h>
 
 #include <library/cpp/testing/common/network.h>
 
@@ -17,6 +18,7 @@
 #include <benchmark/benchmark.h>
 
 #include <atomic>
+#include <cstdlib>
 #include <memory>
 
 using namespace NCloud::NFastShard;
@@ -27,13 +29,14 @@ namespace {
 
 ////////////////////////////////////////////////////////////////////////////////
 // The google benchmark module owns main(), so the silk runtime is
-// brought up lazily on first use and left to die with the process.
+// brought up lazily on first use and torn down via atexit: a scheduler
+// thread still running during static destruction segfaults the process.
 
 void EnsureSilk()
 {
     static const bool initialized = [] {
-        silk::initialize();
-        FiberScheduler::initialize();
+        Init();
+        std::atexit(Destroy);
         return true;
     }();
     Y_UNUSED(initialized);
@@ -49,6 +52,7 @@ struct TBenchFixture
     NTesting::TPortHolder Port;
     IServerPtr Server;
     IStorageNodePtr Client;
+    TFastShardContext Ctx{0};
 
     TBenchFixture()
         : Storage(std::make_shared<TFakeStorageNode>())
@@ -93,6 +97,7 @@ int CallFiberMain(TDriverParams* params) noexcept
                 pg->AddContent(TString(4_KB, 'x'));
             }
             auto resp = params->Fixture->Client->WriteLogRecord(
+                params->Fixture->Ctx,
                 std::move(req));
             if (resp.GetError().GetCode()) {
                 params->ErrorCount->fetch_add(1);
@@ -101,6 +106,7 @@ int CallFiberMain(TDriverParams* params) noexcept
             NCloud::NProto::TAcquireDevicesRequest req;
             req.AddDeviceUUIDs("bench-dev");
             auto resp = params->Fixture->Client->AcquireDevices(
+                params->Fixture->Ctx,
                 std::move(req));
             if (resp.GetError().GetCode()) {
                 params->ErrorCount->fetch_add(1);

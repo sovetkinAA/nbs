@@ -10,6 +10,7 @@
 #include <cloud/blockstore/libs/service/request_helpers.h>
 #include <cloud/blockstore/libs/storage/model/volume_label.h>
 
+#include <cloud/storage/core/libs/common/helpers.h>
 #include <cloud/storage/core/libs/common/media.h>
 #include <cloud/storage/core/libs/common/timer.h>
 #include <cloud/storage/core/libs/common/verify.h>
@@ -73,10 +74,13 @@ public:
 
 class TDowntimeCalculator
 {
-private:
-    using TMaxTimeCalculator = TMaxCalculator<DEFAULT_BUCKET_COUNT>;
+public:
+    static constexpr size_t BucketCount = DEFAULT_BUCKET_COUNT;
 
-    const TDiagnosticsConfigPtr DiagnosticsConfig;
+private:
+    using TMaxTimeCalculator = TMaxCalculator<BucketCount>;
+
+    const TDiagnosticsConfigConstPtr DiagnosticsConfig;
     const NProto::EStorageMediaKind MediaKind;
 
     TMaxTimeCalculator Read;
@@ -85,7 +89,7 @@ private:
 
 public:
     TDowntimeCalculator(
-            TDiagnosticsConfigPtr diagnosticsConfig,
+            TDiagnosticsConfigConstPtr diagnosticsConfig,
             const NProto::TVolume& volume,
             ITimerPtr timer)
         : DiagnosticsConfig(std::move(diagnosticsConfig))
@@ -172,11 +176,12 @@ struct TVolumeInfoBase
     TDowntimeHistoryHolder DowntimeHistory;
     TMaxCalculator<DEFAULT_BUCKET_COUNT> ThrottlerRejects;
     TMaxCalculator<DEFAULT_BUCKET_COUNT> CheckpointRejects;
+    TMaxCalculator<TDowntimeCalculator::BucketCount> HardwareProblems;
     TDynamicCounters::TCounterPtr HasStorageConfigPatchCounter;
 
     TVolumeInfoBase(
             NProto::TVolume volume,
-            TDiagnosticsConfigPtr diagnosticsConfig,
+            TDiagnosticsConfigConstPtr diagnosticsConfig,
             IPostponeTimePredictorPtr postponeTimePredictor,
             TDynamicCountersPtr volumeGroup,
             ITimerPtr timer)
@@ -188,6 +193,7 @@ struct TVolumeInfoBase
         , DowntimeCalculator(diagnosticsConfig, Volume, timer)
         , ThrottlerRejects(timer)
         , CheckpointRejects(timer)
+        , HardwareProblems(timer)
         , HasStorageConfigPatchCounter(
             volumeGroup->GetCounter("HasStorageConfigPatch"))
     {
@@ -445,6 +451,8 @@ public:
                 postponedTime + backoffTime + shapingTime),   // waitTime
             requestBytes);
         VolumeBase->PostponeTimePredictor->Register(postponedTime);
+
+        RecordHardwareProblems(errorKind, errorFlags);
         VolumeBase->DowntimeCalculator.RequestCompleted(
             TranslateLocalRequestType(requestType),
             requestStarted,
@@ -491,6 +499,7 @@ public:
         EDiagnosticsErrorKind errorKind,
         ui32 errorFlags) override
     {
+        RecordHardwareProblems(errorKind, errorFlags);
         if (errorKind == EDiagnosticsErrorKind::ErrorWriteRejectedByCheckpoint) {
             VolumeBase->CheckpointRejects.Add(1);
         } else if (errorKind == EDiagnosticsErrorKind::ErrorThrottling) {
@@ -556,6 +565,17 @@ public:
             timeHist,
             sizeHist);
     }
+private:
+    void RecordHardwareProblems(
+        EDiagnosticsErrorKind errorKind,
+        ui32 errorFlags)
+    {
+        if (errorKind != EDiagnosticsErrorKind::Success &&
+            HasProtoFlag(errorFlags, NCloud::NProto::EF_HW_PROBLEMS_DETECTED))
+        {
+            VolumeBase->HardwareProblems.Add(1);
+        }
+    }
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -620,7 +640,7 @@ class TVolumeStats final
 private:
     const IMonitoringServicePtr Monitoring;
     const TDuration InactiveClientsTimeout;
-    const TDiagnosticsConfigPtr DiagnosticsConfig;
+    const TDiagnosticsConfigConstPtr DiagnosticsConfig;
     const EVolumeStatsType Type;
     const ITimerPtr Timer;
     const THashSet<TString> CloudIdsWithStrictSLA;
@@ -661,7 +681,7 @@ public:
     TVolumeStats(
             IMonitoringServicePtr monitoring,
             TDuration inactiveClientsTimeout,
-            TDiagnosticsConfigPtr diagnosticsConfig,
+            TDiagnosticsConfigConstPtr diagnosticsConfig,
             EVolumeStatsType type,
             ITimerPtr timer)
         : Monitoring(std::move(monitoring))
@@ -1026,8 +1046,13 @@ public:
             volumeBase.BusyIdleCalc.OnUpdateStats();
             volumeBase.PerfCalc.UpdateStats();
 
-            const auto hasDowntime = volumeBase.DowntimeCalculator.OnUpdateStats();
-            if (hasDowntime) {
+            const bool hasDowntime =
+                volumeBase.DowntimeCalculator.OnUpdateStats();
+            const bool isNrd = IsNonReplicatedMediaKind(
+                volumeBase.Volume.GetStorageMediaKind());
+            const bool hasHwProblems =
+                volumeBase.HardwareProblems.NextValue() != 0;
+            if (hasDowntime && !(isNrd && hasHwProblems)) {
                 ++totalDownDisks;
                 ++downDisksCounters[volumeBase.Volume.GetStorageMediaKind()];
             }
@@ -1540,7 +1565,7 @@ struct TVolumeStatsStub final
 
 IVolumeStatsPtr CreateVolumeStats(
     IMonitoringServicePtr monitoring,
-    TDiagnosticsConfigPtr diagnosticsConfig,
+    TDiagnosticsConfigConstPtr diagnosticsConfig,
     TDuration inactiveClientsTimeout,
     EVolumeStatsType type,
     ITimerPtr timer)

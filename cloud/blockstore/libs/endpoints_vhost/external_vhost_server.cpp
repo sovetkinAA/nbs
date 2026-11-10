@@ -777,7 +777,7 @@ class TExternalVhostEndpointListener final
     , public IEndpointListener
 {
 private:
-    const TServerAppConfigPtr ServerConfig;
+    const TServerAppConfigConstPtr ServerConfig;
     const ILoggingServicePtr Logging;
     const IServerStatsPtr ServerStats;
     const TExecutorPtr Executor;
@@ -795,7 +795,7 @@ private:
 
 public:
     TExternalVhostEndpointListener(
-            TServerAppConfigPtr serverConfig,
+            TServerAppConfigConstPtr serverConfig,
             ILoggingServicePtr logging,
             IServerStatsPtr serverStats,
             TExecutorPtr executor,
@@ -1288,7 +1288,7 @@ private:
 ////////////////////////////////////////////////////////////////////////////////
 
 IEndpointListenerPtr CreateExternalVhostEndpointListener(
-    TServerAppConfigPtr serverConfig,
+    TServerAppConfigConstPtr serverConfig,
     ILoggingServicePtr logging,
     IServerStatsPtr serverStats,
     TExecutorPtr executor,
@@ -1329,7 +1329,7 @@ IEndpointListenerPtr CreateExternalVhostEndpointListener(
 }
 
 IEndpointListenerPtr CreateExternalVhostEndpointListener(
-    TServerAppConfigPtr serverConfig,
+    TServerAppConfigConstPtr serverConfig,
     ILoggingServicePtr logging,
     IServerStatsPtr serverStats,
     TExecutorPtr executor,

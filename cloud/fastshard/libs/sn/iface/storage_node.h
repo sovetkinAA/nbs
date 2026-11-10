@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cloud/fastshard/libs/common/public.h>
 #include <cloud/fastshard/public/api/protos/device.pb.h>
 
 #include <memory>
@@ -17,6 +18,7 @@ namespace NCloud::NFastShard {
     xxx(WriteLogRecord, __VA_ARGS__)                                           \
     xxx(ReadJournalTail, __VA_ARGS__)                                          \
     xxx(AdvanceLsnLowWatermark, __VA_ARGS__)                                   \
+    xxx(WritePages, __VA_ARGS__)                                               \
 // SN_METHODS
 
 /**
@@ -36,6 +38,7 @@ struct IStorageNode
 
 #define SN_DECLARE_METHOD(name, ...)                                           \
     virtual NCloud::NProto::T##name##Response name(                            \
+        TFastShardContext& ctx,                                                \
         NCloud::NProto::T##name##Request request) = 0;                         \
     // SN_DECLARE_METHOD
 

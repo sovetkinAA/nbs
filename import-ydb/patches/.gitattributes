@@ -1,0 +1,2 @@
+# Preserve unified-diff context and mail footers in imported patches.
+*.patch whitespace=-blank-at-eol,-blank-at-eof

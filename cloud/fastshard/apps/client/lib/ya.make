@@ -12,10 +12,12 @@ SRCS(
     read_pages.cpp
     release_devices.cpp
     write_log_record.cpp
+    write_pages.cpp
 )
 
 PEERDIR(
     cloud/fastshard/libs/bootstrap
+    cloud/fastshard/libs/common
     cloud/fastshard/libs/sn/client
     cloud/fastshard/libs/sn/iface
     cloud/fastshard/public/api/protos

@@ -31,9 +31,8 @@ TResultOrError<ui64> CalculateShardCreationTargetHash(
 // CreatedShardBitmap contains both persisted bits and local creation successes;
 // ShardCreationState holds the last received state, or the target prepared by
 // SetupCreatedShardBitmap. OnShardCreated records a successful shard creation
-// and requests persistence. The actor handles responses, checks their version
-// and target, and calls MergeShardCreationState. A true result means local bits
-// are still missing from the received state and must be persisted again.
+// and requests persistence. MergeShardCreationState reconciles the returned
+// persistent state with local shard creation progress.
 //
 // The actor owns request scheduling, retries, and the fallback for Tablets that
 // do not support persistent state. This companion does not handle actor events.
@@ -44,6 +43,19 @@ public:
     {
         Create,
         Alter,
+    };
+
+    enum class EMergeAction
+    {
+        // A newer response has already advanced the local state. Applying this
+        // response would roll back the stored version.
+        IgnoreStaleResponse,
+        // Local creation bits are missing from the returned persistent bitmap.
+        // Another update is needed to save them before configuring shards.
+        PersistLocalProgress,
+        // All locally created shards are present in the persistent bitmap, so
+        // shard configuration can proceed without losing creation progress.
+        Continue,
     };
 
 private:
@@ -96,13 +108,11 @@ public:
     // replace the local working bitmap.
     void SetShardCreationState(
         const NProtoPrivate::TFileSystemShardCreationState& state);
-    // Require the same creation range and config hash as the current target.
-    NProto::TError ValidateTarget(
-        const NProtoPrivate::TFileSystemShardCreationState& state) const;
-    // Merge received bits with local progress and record the received state.
-    // Returns whether another persistence request is needed. The caller checks
-    // the response version and target before merging.
-    TResultOrError<bool> MergeShardCreationState(
+    // Compare the response version and target with the current state. For a
+    // current response with the same target, union its creation bitmap with
+    // local progress and record the returned persistent state. Leave local
+    // state unchanged for a stale response or a changed target.
+    TResultOrError<EMergeAction> MergeShardCreationState(
         const NProtoPrivate::TFileSystemShardCreationState& state);
 
     // Prepare the working bitmap from state and the committed shard count.

@@ -173,15 +173,14 @@ private:
         const TActorContext& ctx)
     {
         const auto& state = ev->Get()->State;
-        const auto error = Companion.ValidateTarget(state);
-        UNIT_ASSERT_C(!HasError(error), FormatError(error));
-
         const auto mergeResult = Companion.MergeShardCreationState(state);
         UNIT_ASSERT_C(
             !HasError(mergeResult),
             FormatError(mergeResult.GetError()));
 
-        if (mergeResult.GetResult()) {
+        if (mergeResult.GetResult() ==
+            TShardCreationStateCompanion::EMergeAction::PersistLocalProgress)
+        {
             Companion.UpdateShardCreationState(ctx);
         }
     }
@@ -320,11 +319,38 @@ Y_UNIT_TEST_SUITE(TShardCreationStateCompanionTest)
         UNIT_ASSERT_C(
             !HasError(mergeResult),
             FormatError(mergeResult.GetError()));
-        UNIT_ASSERT(!mergeResult.GetResult());
+        UNIT_ASSERT(
+            mergeResult.GetResult() ==
+            TShardCreationStateCompanion::EMergeAction::Continue);
 
         UNIT_ASSERT(companion.IsShardCreated(1));
         UNIT_ASSERT(companion.IsShardCreated(3));
         UNIT_ASSERT_VALUES_EQUAL(11, companion.GetShardCreationStateVersion());
+    }
+
+    Y_UNIT_TEST(ShouldIgnoreStaleShardCreationState)
+    {
+        TShardCreationStateCompanion companion(
+            TString{FileSystemId},
+            TString{FileSystemId},
+            TShardCreationStateCompanion::EMode::Create);
+
+        const auto shardConfigs = MakeShardConfigs();
+        companion.SetShardCreationState(MakeState(11, {1}));
+        const auto error = companion.SetupCreatedShardBitmap(0, shardConfigs);
+        UNIT_ASSERT_C(!HasError(error), FormatError(error));
+
+        const auto mergeResult =
+            companion.MergeShardCreationState(MakeState(10, {2}));
+        UNIT_ASSERT_C(
+            !HasError(mergeResult),
+            FormatError(mergeResult.GetError()));
+        UNIT_ASSERT(
+            mergeResult.GetResult() ==
+            TShardCreationStateCompanion::EMergeAction::IgnoreStaleResponse);
+        UNIT_ASSERT_VALUES_EQUAL(11, companion.GetShardCreationStateVersion());
+        UNIT_ASSERT(companion.IsShardCreated(1));
+        UNIT_ASSERT(!companion.IsShardCreated(2));
     }
 
     Y_UNIT_TEST(ShouldRejectMergingDifferentTarget)
@@ -343,14 +369,16 @@ Y_UNIT_TEST_SUITE(TShardCreationStateCompanionTest)
         auto error = companion.SetupCreatedShardBitmap(0, shardConfigs);
         UNIT_ASSERT_C(!HasError(error), FormatError(error));
 
-        error = companion.ValidateTarget(
+        const auto mergeResult = companion.MergeShardCreationState(
             MakeState(43, {1}, 0, conflictingShardConfigs));
 
-        UNIT_ASSERT_VALUES_EQUAL(E_INVALID_STATE, error.GetCode());
-        UNIT_ASSERT(error.GetMessage().Contains(
+        UNIT_ASSERT(HasError(mergeResult));
+        const auto& mergeError = mergeResult.GetError();
+        UNIT_ASSERT_VALUES_EQUAL(E_INVALID_STATE, mergeError.GetCode());
+        UNIT_ASSERT(mergeError.GetMessage().Contains(
             "Shard creation target changed while request was in progress"));
-        UNIT_ASSERT(error.GetMessage().Contains("request base=0"));
-        UNIT_ASSERT(error.GetMessage().Contains("stored base=0"));
+        UNIT_ASSERT(mergeError.GetMessage().Contains("request base=0"));
+        UNIT_ASSERT(mergeError.GetMessage().Contains("stored base=0"));
     }
 
     Y_UNIT_TEST(ShouldRejectConflictingUncommittedShardCreationState)

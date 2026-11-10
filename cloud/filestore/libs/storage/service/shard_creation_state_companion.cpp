@@ -143,43 +143,49 @@ void TShardCreationStateCompanion::SetShardCreationState(
     ShardCreationState = state;
 }
 
-NProto::TError TShardCreationStateCompanion::ValidateTarget(
-    const NProtoPrivate::TFileSystemShardCreationState& state) const
-{
-    if (ShardCreationState.GetBaseShardCount() == state.GetBaseShardCount() &&
-        ShardCreationState.GetTargetShardCount() ==
-            state.GetTargetShardCount() &&
-        ShardCreationState.GetTargetShardConfigHash() ==
-            state.GetTargetShardConfigHash())
-    {
-        return {};
-    }
-
-    return MakeError(
-        E_INVALID_STATE,
-        TStringBuilder()
-            << "Shard creation target changed while request was in progress"
-            << " for filesystem " << FileSystemId.Quote()
-            << ": request base=" << ShardCreationState.GetBaseShardCount()
-            << ", target=" << ShardCreationState.GetTargetShardCount()
-            << ", hash=" << ShardCreationState.GetTargetShardConfigHash()
-            << "; stored base=" << state.GetBaseShardCount()
-            << ", target=" << state.GetTargetShardCount()
-            << ", hash=" << state.GetTargetShardConfigHash()
-            << ". Retry the request after the concurrent create/resize"
-            << " operation completes");
-}
-
-TResultOrError<bool> TShardCreationStateCompanion::MergeShardCreationState(
+TResultOrError<TShardCreationStateCompanion::EMergeAction>
+TShardCreationStateCompanion::MergeShardCreationState(
     const NProtoPrivate::TFileSystemShardCreationState& state)
 {
+    if (state.GetVersion() < ShardCreationState.GetVersion())
+    {
+        return EMergeAction::IgnoreStaleResponse;
+    }
+
+    if (ShardCreationState.GetBaseShardCount() != state.GetBaseShardCount() ||
+        ShardCreationState.GetTargetShardCount() !=
+            state.GetTargetShardCount() ||
+        ShardCreationState.GetTargetShardConfigHash() !=
+            state.GetTargetShardConfigHash())
+    {
+        return MakeError(
+            E_INVALID_STATE,
+            TStringBuilder()
+                << "Shard creation target changed while request was in progress"
+                << " for filesystem " << FileSystemId.Quote()
+                << ": request base=" << ShardCreationState.GetBaseShardCount()
+                << ", target=" << ShardCreationState.GetTargetShardCount()
+                << ", hash=" << ShardCreationState.GetTargetShardConfigHash()
+                << "; stored base=" << state.GetBaseShardCount()
+                << ", target=" << state.GetTargetShardCount()
+                << ", hash=" << state.GetTargetShardConfigHash()
+                << ". Retry the request after the concurrent create/resize"
+                << " operation completes");
+    }
+
     if (CreatedShardBitmap) {
         MergeCompressedBitmap(
             *CreatedShardBitmap,
             state.GetCreatedShardBitmap());
     }
     SetShardCreationState(state);
-    return HasUnpersistedCreatedShards();
+    const auto unpersisted = HasUnpersistedCreatedShards();
+    if (HasError(unpersisted)) {
+        return unpersisted.GetError();
+    }
+    return unpersisted.GetResult()
+        ? EMergeAction::PersistLocalProgress
+        : EMergeAction::Continue;
 }
 
 NProto::TError TShardCreationStateCompanion::SetupCreatedShardBitmap(

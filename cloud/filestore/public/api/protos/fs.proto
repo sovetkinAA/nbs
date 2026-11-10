@@ -76,8 +76,6 @@ message TFileStoreFeatures
 
     // Server WriteBackCache state file size in bytes per session.
     uint64 ServerWriteBackCacheStateFileSize = 58;
-
-    bool EnablePreallocatedDataActors = 59;
 }
 
 message TFileStore

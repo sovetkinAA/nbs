@@ -1198,8 +1198,8 @@ TReadDataActorPool::TReadDataActorPool(
     : TWorkerActorPool(
           [profileLog = std::move(profileLog),
            traceSerializer = std::move(traceSerializer),
-           inFlightRequests = std::move(inFlightRequests)](
-              const TActorContext& ctx)
+           inFlightRequests =
+               std::move(inFlightRequests)](const TActorContext& ctx)
           {
               return NCloud::Register<TReadDataActor>(
                   ctx,
@@ -1211,13 +1211,6 @@ TReadDataActorPool::TReadDataActorPool(
 {}
 
 ////////////////////////////////////////////////////////////////////////////////
-
-void TStorageServiceActor::HandleReleaseReadDataActor(
-    const TEvServicePrivate::TEvReleaseReadDataActor::TPtr& ev,
-    const TActorContext&)
-{
-    ReadDataActorPool.ReleaseActor(ev->Sender);
-}
 
 void TStorageServiceActor::HandleReadData(
     const TEvService::TEvReadDataRequest::TPtr& ev,
@@ -1365,10 +1358,17 @@ void TStorageServiceActor::HandleReadData(
             ProfileLog,
             TraceSerializer,
             InFlightRequests,
-            ctx.SelfID);
+            TActorId{});
         actor->Initialize(std::move(context));
         NCloud::Register(ctx, std::move(actor));
     }
+}
+
+void TStorageServiceActor::HandleReleaseReadDataActor(
+    const TEvServicePrivate::TEvReleaseReadDataActor::TPtr& ev,
+    const TActorContext&)
+{
+    ReadDataActorPool.ReleaseActor(ev->Sender);
 }
 
 }   // namespace NCloud::NFileStore::NStorage

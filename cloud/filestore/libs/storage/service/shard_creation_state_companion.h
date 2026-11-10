@@ -22,17 +22,16 @@ TResultOrError<ui64> CalculateShardCreationTargetHash(
 
 ////////////////////////////////////////////////////////////////////////////////
 
-// Tracks shard creation progress for one create/resize actor. The actor reads
-// state from the main Tablet and calls SetShardCreationState, then
+// Tracks shard creation progress for one create/resize actor. HandleResponse
+// records the initial state read from the main Tablet. The actor calls
 // SetupCreatedShardBitmap once the committed topology and desired shard configs
-// are known. A response without state calls for MarkPersistentStateUnsupported
-// and the actor's non-persistent fallback instead.
+// are known. A response without state selects the non-persistent fallback.
 //
 // CreatedShardBitmap contains both persisted bits and local creation successes;
 // ShardCreationState holds the last received state, or the target prepared by
 // SetupCreatedShardBitmap. OnShardCreated records a successful shard creation
-// and requests persistence. MergeShardCreationState reconciles the returned
-// persistent state with local shard creation progress.
+// and requests persistence. HandleResponse reconciles returned persistent
+// state with local shard creation progress.
 //
 // The actor owns request scheduling, retries, and the fallback for Tablets that
 // do not support persistent state. This companion does not handle actor events.
@@ -45,6 +44,21 @@ public:
         Alter,
     };
 
+    enum class EResponseAction
+    {
+        // The Tablet did not return state on the initial read.
+        StartWithoutPersistentState,
+        // The initial persistent state was recorded.
+        InitialStateLoaded,
+        // A newer response has already been recorded.
+        IgnoreStaleResponse,
+        // Local creation progress is absent from the persistent bitmap.
+        PersistLocalProgress,
+        // All locally created shards are recorded in persistent storage.
+        Continue,
+    };
+
+private:
     enum class EMergeAction
     {
         // A newer response has already advanced the local state. Applying this
@@ -58,7 +72,6 @@ public:
         Continue,
     };
 
-private:
     enum class EShardCreationStateStatus
     {
         // The initial state request has not completed yet.
@@ -108,12 +121,11 @@ public:
     // replace the local working bitmap.
     void SetShardCreationState(
         const NProtoPrivate::TFileSystemShardCreationState& state);
-    // Compare the response version and target with the current state. For a
-    // current response with the same target, union its creation bitmap with
-    // local progress and record the returned persistent state. Leave local
-    // state unchanged for a stale response or a changed target.
-    TResultOrError<EMergeAction> MergeShardCreationState(
-        const NProtoPrivate::TFileSystemShardCreationState& state);
+    // Classify the Tablet response and update local shard creation state.
+    // Returns an error for a failed response or an invalid state transition.
+    TResultOrError<EResponseAction> HandleResponse(
+        const NProtoPrivate::TUnsafeChangeTabletStateResponse& response);
+    void LogPersistentStateUnsupported(const NActors::TActorContext& ctx) const;
 
     // Prepare the working bitmap from state and the committed shard count.
     // Reject a different target while created shards remain uncommitted;
@@ -130,6 +142,12 @@ public:
     void LogStateUnavailable(const NActors::TActorContext& ctx) const;
 
 private:
+    // Compare the response version and target with the current state. For a
+    // current response with the same target, union its creation bitmap with
+    // local progress and record the returned persistent state. Leave local
+    // state unchanged for a stale response or a changed target.
+    TResultOrError<EMergeAction> MergeShardCreationState(
+        const NProtoPrivate::TFileSystemShardCreationState& state);
     TResultOrError<bool> HasUnpersistedCreatedShards() const;
     TResultOrError<bool> HasUncommittedCreatedShards(
         ui32 committedShardCount) const;

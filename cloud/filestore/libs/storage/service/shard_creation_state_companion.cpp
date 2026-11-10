@@ -1,5 +1,6 @@
 #include "shard_creation_state_companion.h"
 
+#include <cloud/filestore/libs/diagnostics/critical_events.h>
 #include <cloud/filestore/libs/storage/api/components.h>
 #include <cloud/filestore/libs/storage/api/tablet_proxy.h>
 
@@ -141,6 +142,88 @@ void TShardCreationStateCompanion::SetShardCreationState(
 {
     ShardCreationStateStatus = EShardCreationStateStatus::Supported;
     ShardCreationState = state;
+}
+
+TResultOrError<TShardCreationStateCompanion::EResponseAction>
+TShardCreationStateCompanion::HandleResponse(
+    const NProtoPrivate::TUnsafeChangeTabletStateResponse& response)
+{
+    if (HasError(response.GetError())) {
+        const auto* action = IsPersistentStateLoaded() ? "update" : "read";
+        return MakeError(
+            E_REJECTED,
+            TStringBuilder() << "failed to " << action
+                             << " shard creation state");
+    }
+
+    if (!response.HasShardCreationState()) {
+        if (!IsPersistentStateLoaded()) {
+            // Older Tablets accept the request but do not return this state.
+            MarkPersistentStateUnsupported();
+            return EResponseAction::StartWithoutPersistentState;
+        }
+
+        if (IsPersistentStateSupported()) {
+            ReportShardCreationStateResponseMissing(
+                TStringBuilder() << "Filesystem " << LogTag.Quote()
+                                 << ": response is missing shard creation state"
+                                 << " after persistent state support was confirmed");
+            return MakeError(
+                E_REJECTED,
+                "shard creation state response is missing");
+        }
+
+        ReportShardCreationStateResponseMissing(
+            TStringBuilder() << "Filesystem " << LogTag.Quote()
+                             << ": unexpected response without shard creation"
+                             << " state after switching to non-persistent flow");
+        return MakeError(
+            E_INVALID_STATE,
+            "shard creation state response received after switching to "
+            "non-persistent flow");
+    }
+
+    const auto& state = response.GetShardCreationState();
+    if (!IsPersistentStateLoaded()) {
+        SetShardCreationState(state);
+        return EResponseAction::InitialStateLoaded;
+    }
+
+    if (!HasCreatedShardBitmap()) {
+        ReportShardCreationBitmapMissing(
+            TStringBuilder() << "Filesystem " << LogTag.Quote()
+                             << ": shard creation state response received"
+                             << " without an initialized shard bitmap");
+        return MakeError(
+            E_INVALID_STATE,
+            "shard creation bitmap is not initialized");
+    }
+
+    const auto mergeResult = MergeShardCreationState(state);
+    if (HasError(mergeResult)) {
+        return mergeResult.GetError();
+    }
+
+    switch (mergeResult.GetResult()) {
+        case EMergeAction::IgnoreStaleResponse:
+            return EResponseAction::IgnoreStaleResponse;
+        case EMergeAction::PersistLocalProgress:
+            return EResponseAction::PersistLocalProgress;
+        case EMergeAction::Continue:
+            return EResponseAction::Continue;
+    }
+    Y_ABORT("Unexpected shard creation merge action");
+}
+
+void TShardCreationStateCompanion::LogPersistentStateUnsupported(
+    const TActorContext& ctx) const
+{
+    LOG_WARN(
+        ctx,
+        TFileStoreComponents::SERVICE,
+        "[%s] UnsafeChangeTabletState returned no shard creation "
+        "state, continuing without persistent shard creation state",
+        LogTag.c_str());
 }
 
 TResultOrError<TShardCreationStateCompanion::EMergeAction>

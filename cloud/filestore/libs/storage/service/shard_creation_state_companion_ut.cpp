@@ -95,6 +95,14 @@ NProtoPrivate::TFileSystemShardCreationState MakeState(
     return MakeState(version, createdShards, 0, MakeShardConfigs());
 }
 
+NProtoPrivate::TUnsafeChangeTabletStateResponse MakeResponse(
+    const NProtoPrivate::TFileSystemShardCreationState& state)
+{
+    NProtoPrivate::TUnsafeChangeTabletStateResponse response;
+    *response.MutableShardCreationState() = state;
+    return response;
+}
+
 std::unique_ptr<NCloud::TCompressedBitmap> LoadCreatedShardBitmap(
     const NProtoPrivate::TFileSystemShardCreationState& state)
 {
@@ -184,13 +192,13 @@ private:
         const TActorContext& ctx)
     {
         const auto& state = ev->Get()->State;
-        const auto mergeResult = Companion.MergeShardCreationState(state);
+        const auto mergeResult = Companion.HandleResponse(MakeResponse(state));
         UNIT_ASSERT_C(
             !HasError(mergeResult),
             FormatError(mergeResult.GetError()));
 
         if (mergeResult.GetResult() ==
-            TShardCreationStateCompanion::EMergeAction::PersistLocalProgress)
+            TShardCreationStateCompanion::EResponseAction::PersistLocalProgress)
         {
             Companion.UpdateShardCreationState(ctx);
         }
@@ -212,6 +220,35 @@ struct TActorSystem: TTestActorRuntimeBase
 
 Y_UNIT_TEST_SUITE(TShardCreationStateCompanionTest)
 {
+    Y_UNIT_TEST(ShouldClassifyInitialShardCreationStateResponses)
+    {
+        TShardCreationStateCompanion companion(
+            TString{FileSystemId},
+            TString{FileSystemId},
+            TShardCreationStateCompanion::EMode::Create);
+
+        const auto initial =
+            companion.HandleResponse(MakeResponse(MakeState(42, {1})));
+        UNIT_ASSERT_C(!HasError(initial), FormatError(initial.GetError()));
+        UNIT_ASSERT(
+            initial.GetResult() ==
+            TShardCreationStateCompanion::EResponseAction::InitialStateLoaded);
+        UNIT_ASSERT_VALUES_EQUAL(42, companion.GetShardCreationStateVersion());
+
+        TShardCreationStateCompanion unsupported(
+            TString{FileSystemId},
+            TString{FileSystemId},
+            TShardCreationStateCompanion::EMode::Alter);
+        NProtoPrivate::TUnsafeChangeTabletStateResponse emptyResponse;
+        const auto fallback = unsupported.HandleResponse(emptyResponse);
+        UNIT_ASSERT_C(!HasError(fallback), FormatError(fallback.GetError()));
+        UNIT_ASSERT(
+            fallback.GetResult() ==
+            TShardCreationStateCompanion::EResponseAction::StartWithoutPersistentState);
+        UNIT_ASSERT(unsupported.IsPersistentStateLoaded());
+        UNIT_ASSERT(!unsupported.IsPersistentStateSupported());
+    }
+
     Y_UNIT_TEST(ShouldTrackPersistentShardCreationStateSupport)
     {
         TShardCreationStateCompanion companion(
@@ -326,13 +363,13 @@ Y_UNIT_TEST_SUITE(TShardCreationStateCompanionTest)
         UNIT_ASSERT_C(!HasError(error), FormatError(error));
 
         const auto mergeResult =
-            companion.MergeShardCreationState(MakeState(11, {1, 3}));
+            companion.HandleResponse(MakeResponse(MakeState(11, {1, 3})));
         UNIT_ASSERT_C(
             !HasError(mergeResult),
             FormatError(mergeResult.GetError()));
         UNIT_ASSERT(
             mergeResult.GetResult() ==
-            TShardCreationStateCompanion::EMergeAction::Continue);
+            TShardCreationStateCompanion::EResponseAction::Continue);
 
         UNIT_ASSERT(companion.IsShardCreated(1));
         UNIT_ASSERT(companion.IsShardCreated(3));
@@ -352,13 +389,13 @@ Y_UNIT_TEST_SUITE(TShardCreationStateCompanionTest)
         UNIT_ASSERT_C(!HasError(error), FormatError(error));
 
         const auto mergeResult =
-            companion.MergeShardCreationState(MakeState(10, {2}));
+            companion.HandleResponse(MakeResponse(MakeState(10, {2})));
         UNIT_ASSERT_C(
             !HasError(mergeResult),
             FormatError(mergeResult.GetError()));
         UNIT_ASSERT(
             mergeResult.GetResult() ==
-            TShardCreationStateCompanion::EMergeAction::IgnoreStaleResponse);
+            TShardCreationStateCompanion::EResponseAction::IgnoreStaleResponse);
         UNIT_ASSERT_VALUES_EQUAL(11, companion.GetShardCreationStateVersion());
         UNIT_ASSERT(companion.IsShardCreated(1));
         UNIT_ASSERT(!companion.IsShardCreated(2));
@@ -479,8 +516,8 @@ Y_UNIT_TEST_SUITE(TShardCreationStateCompanionTest)
         auto error = companion.SetupCreatedShardBitmap(0, shardConfigs);
         UNIT_ASSERT_C(!HasError(error), FormatError(error));
 
-        const auto mergeResult = companion.MergeShardCreationState(
-            MakeState(43, {1}, 0, conflictingShardConfigs));
+        const auto mergeResult = companion.HandleResponse(MakeResponse(
+            MakeState(43, {1}, 0, conflictingShardConfigs)));
 
         UNIT_ASSERT(HasError(mergeResult));
         const auto& mergeError = mergeResult.GetError();

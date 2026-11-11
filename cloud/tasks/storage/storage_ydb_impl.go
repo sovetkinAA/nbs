@@ -1620,12 +1620,10 @@ func (s *storageYDB) updateTaskTx(
 		return TaskState{}, err
 	}
 
+	// NOTE: don't commit tx on errors below: it may contain changes made by
+	// preparation, which must not be applied without the task state update.
+	// E.g. compoundStorage retries the update in another storage on NotFound.
 	if len(states) == 0 {
-		err = tx.Commit(ctx)
-		if err != nil {
-			return TaskState{}, err
-		}
-
 		return TaskState{}, errors.NewNonRetriableError(
 			errors.NewNotFoundErrorWithTaskID(state.ID),
 		)
@@ -1634,11 +1632,6 @@ func (s *storageYDB) updateTaskTx(
 	lastState := states[0]
 
 	if lastState.NonCancellable && IsCancellationRequested(state.Status) {
-		err = tx.Commit(ctx)
-		if err != nil {
-			return TaskState{}, err
-		}
-
 		// It is forbidden to start the cancellation process for a
 		// non-cancellable task
 		return TaskState{}, errors.NewNonRetriableErrorf(

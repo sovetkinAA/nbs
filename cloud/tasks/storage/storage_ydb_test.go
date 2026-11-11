@@ -5463,3 +5463,90 @@ func TestStorageYDBIsTaskEnded(t *testing.T) {
 		nonExistentTaskID,
 	)))
 }
+
+func TestStorageYDBUpdateTaskWithPreparationInLegacyStorageFallback(
+	t *testing.T,
+) {
+
+	ctx, cancel := context.WithCancel(newContext())
+	defer cancel()
+
+	db, err := newYDB(ctx)
+	require.NoError(t, err)
+	defer db.Close(ctx)
+
+	legacyFolder := fmt.Sprintf("storage_ydb_test/%v/legacy", t.Name())
+	folder := fmt.Sprintf("storage_ydb_test/%v/new", t.Name())
+
+	for _, f := range []string{legacyFolder, folder} {
+		err = CreateYDBTables(
+			ctx,
+			&tasks_config.TasksConfig{StorageFolder: &f},
+			db,
+			false, // dropUnusedColumns
+		)
+		require.NoError(t, err)
+	}
+
+	storage, err := NewStorage(
+		&tasks_config.TasksConfig{
+			StorageFolder:       &folder,
+			LegacyStorageFolder: &legacyFolder,
+		},
+		empty.NewRegistry(),
+		db,
+	)
+	require.NoError(t, err)
+
+	err = db.CreateOrAlterTable(
+		ctx,
+		folder,
+		"prepared",
+		persistence.NewCreateTableDescription(
+			persistence.WithColumn("id", persistence.Optional(persistence.TypeUTF8)),
+			persistence.WithPrimaryKeyColumn("id"),
+		),
+		false, // dropUnusedColumns
+	)
+	require.NoError(t, err)
+
+	createdAt := time.Now()
+	taskID, err := storage.CreateTask(ctx, TaskState{
+		IdempotencyKey: getIdempotencyKeyForTest(t),
+		TaskType:       "task1",
+		Description:    "Some task",
+		CreatedAt:      createdAt,
+		CreatedBy:      "some_user",
+		ModifiedAt:     createdAt,
+		Status:         TaskStatusRunning,
+		State:          []byte{0},
+		Dependencies:   common.NewStringSet(),
+	})
+	require.NoError(t, err)
+
+	state, err := storage.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	state.Status = TaskStatusFinished
+	state.ModifiedAt = time.Now()
+
+	// The task exists only in the new storage, so the legacy storage is tried
+	// first and returns NotFound. Its preparation must not be committed:
+	// otherwise the second insert of the same key fails.
+	_, err = storage.UpdateTaskWithPreparation(
+		ctx,
+		state,
+		func(ctx context.Context, tx *persistence.Transaction) error {
+			_, err := tx.Execute(ctx, fmt.Sprintf(`
+				--!syntax_v1
+				pragma TablePathPrefix = "%v";
+				insert into prepared (id) values ("id"u);
+			`, db.AbsolutePath(folder)))
+			return err
+		},
+	)
+	require.NoError(t, err)
+
+	state, err = storage.GetTask(ctx, taskID)
+	require.NoError(t, err)
+	require.Equal(t, TaskStatusFinished, state.Status)
+}

@@ -336,7 +336,17 @@ void RenderCell(
                 }
             }
             TABLEBODY() {
+                // a cell can be a thousand hosts, most of them never asked:
+                // one line for those, a row each for the ones that matter
+                ui32 cold = 0;
                 for (const auto& status: statuses) {
+                    if (status.Liveness == EHostLiveness::Unknown &&
+                        !status.Warm && !status.Connections)
+                    {
+                        ++cold;
+                        continue;
+                    }
+
                     // a host found by discovery takes the cell's ports
                     NProto::TCellHostConfig proto;
                     proto.SetFqdn(status.Fqdn);
@@ -378,6 +388,12 @@ void RenderCell(
                             out << FormatPort(host.GetSecureGrpcPort());
                         }
                         TABLED() { out << FormatPort(host.GetRdmaPort()); }
+                    }
+                }
+                if (cold) {
+                    TABLER() {
+                        out << "<td colspan='7'>" << cold
+                            << " cold hosts not probed</td>";
                     }
                 }
             }

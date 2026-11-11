@@ -11,6 +11,7 @@ SRCS(
     endpoint_bootstrap.cpp
     endpoint_router.cpp
     forward_service.cpp
+    host_discovery.cpp
     host_pool.cpp
     mon.cpp
     remote_storage.cpp
@@ -22,6 +23,7 @@ PEERDIR(
     cloud/blockstore/config
     cloud/blockstore/libs/common
     cloud/blockstore/libs/diagnostics
+    cloud/blockstore/libs/discovery
     cloud/blockstore/libs/kikimr
     cloud/blockstore/libs/service
 

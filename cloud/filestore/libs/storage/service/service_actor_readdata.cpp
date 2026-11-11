@@ -116,10 +116,10 @@ struct TReadRequestContext
 struct TEvStartReadData final
     : public TEventLocal<TEvStartReadData, TEvServicePrivate::EvStartReadData>
 {
-    TReadRequestContext Context;
+    TReadRequestContext RequestContext;
 
     TEvStartReadData(TReadRequestContext&& context)
-        : Context(std::move(context))
+        : RequestContext(std::move(context))
     {}
 };
 
@@ -225,8 +225,8 @@ private:
 
 ////////////////////////////////////////////////////////////////////////////////
 
-TReadDataActor::TRequestState::TRequestState(TReadRequestContext params)
-    : RequestContext(std::move(params))
+TReadDataActor::TRequestState::TRequestState(TReadRequestContext context)
+    : RequestContext(std::move(context))
     , OriginByteRange(
           RequestContext.ReadRequest.GetOffset(),
           RequestContext.ReadRequest.GetLength(),
@@ -273,7 +273,7 @@ void TReadDataActor::HandleStartReadData(
     const TActorContext& ctx)
 {
     auto* msg = ev->Get();
-    Initialize(std::move(msg->Params));
+    Initialize(std::move(msg->RequestContext));
     StartRequest(ctx);
 }
 

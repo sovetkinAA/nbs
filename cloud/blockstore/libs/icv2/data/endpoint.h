@@ -15,10 +15,10 @@ namespace NCloud::NBlockStore::NIcV2 {
 // Set a positive Headers.RequestTimeout in milliseconds for each request.
 // Write buffers may be reused after the call; keep read buffers accessible
 // until the returned future is ready, or close their Sglist before reuse.
-// Call Stop outside callbacks before releasing the last reference. It closes
-// the channel and waits for admitted requests and their continuations.
-// Continuations must not throw or call Stop. Neither timeout nor shutdown
-// cancels operations already sent to remote storage.
+// Release without Stop is allowed; the channel owner must outlive cleanup.
+// Optional Stop waits for requests and continuations; call it outside
+// callbacks. Continuations must not throw or call Stop. Neither timeout nor
+// shutdown cancels operations already sent to remote storage.
 struct IDataEndpoint: public IBlockStore
 {
     // Rejects new requests with E_CANCELLED and closes the channel without

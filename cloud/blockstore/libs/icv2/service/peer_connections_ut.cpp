@@ -2,10 +2,13 @@
 
 #include <cloud/blockstore/libs/cells/iface/config.h>
 
+#include <cloud/storage/core/libs/common/scheduler_test.h>
 #include <cloud/storage/core/libs/common/thread_pool.h>
 #include <cloud/storage/core/libs/common/timer_test.h>
 
 #include <library/cpp/testing/unittest/registar.h>
+
+#include <util/generic/scope.h>
 
 #include <array>
 #include <atomic>
@@ -103,13 +106,63 @@ struct TTestHandshake final: IHandshakeProvider
     }
 };
 
-struct TTestHostHandler final: IHostConnectionHandler
+struct TTestResolver final: NCloud::NIcV2::IAddressResolver
+{
+    struct TRequest
+    {
+        TString Host;
+        ui16 Port;
+        NThreading::TPromise<NCloud::NIcV2::TResolveResult> Promise =
+            NThreading::NewPromise<NCloud::NIcV2::TResolveResult>();
+    };
+
+    bool Deferred = false;
+    TVector<TRequest> Requests;
+
+    NCloud::NIcV2::TResolveFuture Resolve(
+        const TString& host,
+        ui16 port) override
+    {
+        auto& request = Requests.emplace_back(host, port);
+        auto future = request.Promise.GetFuture();
+        if (!Deferred) {
+            request.Promise.SetValue(
+                TVector<NInterconnect::TAddress>{
+                    NInterconnect::TAddress("127.0.0.1", port)});
+        }
+        return future;
+    }
+};
+
+////////////////////////////////////////////////////////////////////////////////
+
+struct TTestHostHandler final: IClientEndpointHandler
 {
     std::atomic<size_t> Disconnects = 0;
+    std::atomic<size_t> Connects = 0;
+    std::atomic<size_t> Unavailable = 0;
+    std::function<void()> OnConnected;
+    std::function<void()> OnDisconnected;
+
+    void HandleConnected() noexcept override
+    {
+        ++Connects;
+        if (OnConnected) {
+            OnConnected();
+        }
+    }
+
+    void HandleUnavailable() noexcept override
+    {
+        ++Unavailable;
+    }
 
     void HandleDisconnected() noexcept override
     {
         ++Disconnects;
+        if (OnDisconnected) {
+            OnDisconnected();
+        }
     }
 };
 
@@ -182,6 +235,9 @@ struct TFixture
     std::shared_ptr<TTestHandshake> Handshake =
         std::make_shared<TTestHandshake>();
     std::shared_ptr<TTestTimer> Timer = std::make_shared<TTestTimer>();
+    std::shared_ptr<TTestScheduler> Scheduler =
+        std::make_shared<TTestScheduler>(Timer->Now());
+    std::shared_ptr<TTestResolver> Resolver = std::make_shared<TTestResolver>();
     TVector<std::shared_ptr<TTestChannel>> Channels;
     std::function<void(TTestChannel&)> PrepareChannel;
     IPeerConnectionsPtr Peers;
@@ -195,6 +251,8 @@ struct TFixture
             Connector,
             Handshake,
             Timer,
+            Scheduler,
+            Resolver,
             std::move(completions),
             [this](const THandshakeReady&) -> TChannelResult
             {
@@ -212,6 +270,13 @@ struct TFixture
     ~TFixture()
     {
         Peers->Stop();
+    }
+
+    void Retry()
+    {
+        Timer->AdvanceTime(TDuration::Seconds(1));
+        Scheduler->AdvanceTime(TDuration::Seconds(1));
+        Scheduler->RunAllScheduledTasksUntilNow();
     }
 
     void Connect(size_t index = 0)
@@ -244,44 +309,167 @@ Y_UNIT_TEST_SUITE(TIcV2PeerConnectionsTest)
         UNIT_ASSERT(!HasError(Wait(channel).GetError()));
     }
 
-    Y_UNIT_TEST(ReportsHostChannelStateWithoutStartingAConnection)
+    Y_UNIT_TEST(ReportsHostChannelStateAndRetriesWithoutIo)
     {
         TFixture f;
+        auto handler = std::make_shared<TTestHostHandler>();
         f.Peers->Start();
-        UNIT_ASSERT(!HasError(f.Peers->RegisterHost(
-            "cell-2",
-            1,
-            {NInterconnect::TAddress("127.0.0.1", 1111)},
-            {})));
-        const auto idle = f.Peers->GetHostStatus("cell-2", 1);
-        UNIT_ASSERT(idle.State == EHostChannelState::Idle);
-        UNIT_ASSERT_VALUES_EQUAL(idle.ConnectionAttempts, 0);
-        UNIT_ASSERT(f.Connector->Requests.empty());
-
+        UNIT_ASSERT(!HasError(
+            f.Peers
+                ->RegisterHost("cell-2", 1, "selected-host", 1111, handler)));
+        UNIT_ASSERT_VALUES_EQUAL(f.Resolver->Requests.size(), 1);
+        UNIT_ASSERT_VALUES_EQUAL(f.Resolver->Requests[0].Host, "selected-host");
+        UNIT_ASSERT_VALUES_EQUAL(f.Connector->Requests.size(), 1);
+        UNIT_ASSERT(
+            f.Peers->GetHostStatus("cell-2", 1).State ==
+            EHostChannelState::Connecting);
         auto failed = f.Peers->GetHostChannel("cell-2", 1);
-        const auto connecting = f.Peers->GetHostStatus("cell-2", 1);
-        UNIT_ASSERT(connecting.State == EHostChannelState::Connecting);
-        UNIT_ASSERT_VALUES_EQUAL(connecting.ConnectionAttempts, 1);
         f.Connector->Requests[0].Promise.SetValue(
             MakeError(E_IO, "connection refused"));
         UNIT_ASSERT_VALUES_EQUAL(Wait(failed).GetError().GetCode(), E_IO);
-        const auto disconnected = f.Peers->GetHostStatus("cell-2", 1);
-        UNIT_ASSERT(disconnected.State == EHostChannelState::Disconnected);
-        UNIT_ASSERT_VALUES_EQUAL(disconnected.ConnectionFailures, 1);
-
-        auto retry = f.Peers->GetHostChannel("cell-2", 1);
+        UNIT_ASSERT_VALUES_EQUAL(handler->Unavailable.load(), 1);
+        UNIT_ASSERT_VALUES_EQUAL(handler->Disconnects.load(), 0);
+        UNIT_ASSERT_VALUES_EQUAL(
+            f.Peers->GetHostStatus("cell-2", 1).ConnectionFailures,
+            1);
+        UNIT_ASSERT_VALUES_EQUAL(
+            Wait(f.Peers->GetHostChannel("cell-2", 1)).GetError().GetCode(),
+            E_UNAVAILABLE);
+        UNIT_ASSERT_VALUES_EQUAL(f.Connector->Requests.size(), 1);
+        f.Retry();
+        UNIT_ASSERT_VALUES_EQUAL(f.Connector->Requests.size(), 2);
         f.Connect(1);
         f.Hello();
-        UNIT_ASSERT(!HasError(Wait(retry).GetError()));
-        const auto connected = f.Peers->GetHostStatus("cell-2", 1);
-        UNIT_ASSERT(connected.State == EHostChannelState::Connected);
-        UNIT_ASSERT_VALUES_EQUAL(connected.ConnectionAttempts, 2);
-        UNIT_ASSERT_VALUES_EQUAL(connected.ConnectionFailures, 1);
-
-        f.Channels[0]->Close();
+        UNIT_ASSERT_VALUES_EQUAL(handler->Connects.load(), 1);
         UNIT_ASSERT(
             f.Peers->GetHostStatus("cell-2", 1).State ==
-            EHostChannelState::Disconnected);
+            EHostChannelState::Connected);
+        f.Channels[0]->Close();
+        UNIT_ASSERT_VALUES_EQUAL(handler->Disconnects.load(), 1);
+        f.Retry();
+        UNIT_ASSERT_VALUES_EQUAL(f.Connector->Requests.size(), 3);
+    }
+
+    Y_UNIT_TEST(ReportsRepeatedDnsFailuresAndRecoversWithoutIo)
+    {
+        TFixture f;
+        f.Resolver->Deferred = true;
+        auto handler = std::make_shared<TTestHostHandler>();
+        f.Peers->Start();
+        UNIT_ASSERT(!HasError(
+            f.Peers->RegisterHost("cell-2", 1, "host", 1111, handler)));
+        UNIT_ASSERT(f.Connector->Requests.empty());
+        f.Resolver->Requests[0].Promise.SetValue(
+            MakeError(E_UNAVAILABLE, "DNS failed"));
+        UNIT_ASSERT_VALUES_EQUAL(handler->Unavailable.load(), 1);
+        f.Retry();
+        UNIT_ASSERT_VALUES_EQUAL(f.Resolver->Requests.size(), 2);
+        f.Resolver->Requests[1].Promise.SetValue(
+            MakeError(E_UNAVAILABLE, "DNS still failed"));
+        UNIT_ASSERT_VALUES_EQUAL(handler->Unavailable.load(), 2);
+        f.Retry();
+        f.Resolver->Requests[2].Promise.SetValue(
+            TVector<NInterconnect::TAddress>{
+                NInterconnect::TAddress("127.0.0.1", 1111)});
+        f.Connect();
+        f.Hello();
+        UNIT_ASSERT_VALUES_EQUAL(handler->Connects.load(), 1);
+    }
+
+    Y_UNIT_TEST(PendingDnsDoesNotBlockAnotherBindingAndRetiredResultIsIgnored)
+    {
+        TFixture f;
+        f.Resolver->Deferred = true;
+        auto retired = std::make_shared<TTestHostHandler>();
+        auto current = std::make_shared<TTestHostHandler>();
+        f.Peers->Start();
+        UNIT_ASSERT(!HasError(
+            f.Peers->RegisterHost("cell-2", 1, "slow-host", 1111, retired)));
+        UNIT_ASSERT(!HasError(
+            f.Peers->RegisterHost("cell-2", 2, "other-host", 2222, current)));
+        UNIT_ASSERT_VALUES_EQUAL(f.Resolver->Requests.size(), 2);
+        f.Resolver->Requests[1].Promise.SetValue(
+            TVector<NInterconnect::TAddress>{
+                NInterconnect::TAddress("127.0.0.1", 2222)});
+        f.Connect();
+        f.Hello();
+        UNIT_ASSERT_VALUES_EQUAL(current->Connects.load(), 1);
+        f.Peers->UnregisterHost("cell-2", 1);
+        f.Resolver->Requests[0].Promise.SetValue(
+            TVector<NInterconnect::TAddress>{
+                NInterconnect::TAddress("127.0.0.1", 1111)});
+        UNIT_ASSERT_VALUES_EQUAL(f.Connector->Requests.size(), 1);
+        UNIT_ASSERT_VALUES_EQUAL(retired->Connects.load(), 0);
+        UNIT_ASSERT_VALUES_EQUAL(retired->Unavailable.load(), 0);
+    }
+
+    Y_UNIT_TEST(UnregisterCancelsScheduledReconnect)
+    {
+        TFixture f;
+        auto handler = std::make_shared<TTestHostHandler>();
+        f.Peers->Start();
+        UNIT_ASSERT(!HasError(
+            f.Peers->RegisterHost("cell-2", 1, "host", 1111, handler)));
+        f.Connector->Requests[0].Promise.SetValue(MakeError(E_IO, "failed"));
+        UNIT_ASSERT_VALUES_EQUAL(handler->Unavailable.load(), 1);
+        f.Peers->UnregisterHost("cell-2", 1);
+        f.Retry();
+        UNIT_ASSERT_VALUES_EQUAL(f.Resolver->Requests.size(), 1);
+        UNIT_ASSERT_VALUES_EQUAL(f.Connector->Requests.size(), 1);
+    }
+
+    Y_UNIT_TEST(SerializesReentrantHostNotificationsOutsideCacheLock)
+    {
+        TFixture f;
+        auto handler = std::make_shared<TTestHostHandler>();
+        bool connectedCallback = false;
+        bool nested = false;
+        handler->OnConnected = [&]
+        {
+            connectedCallback = true;
+            Y_UNUSED(f.Peers->GetHostStatus("cell-2", 1));
+            f.Channels[0]->Close();
+            connectedCallback = false;
+        };
+        handler->OnDisconnected = [&]
+        {
+            nested = connectedCallback;
+        };
+        f.Peers->Start();
+        UNIT_ASSERT(!HasError(
+            f.Peers->RegisterHost("cell-2", 1, "host", 1111, handler)));
+        f.Connect();
+        f.Hello();
+        UNIT_ASSERT_VALUES_EQUAL(handler->Connects.load(), 1);
+        UNIT_ASSERT_VALUES_EQUAL(handler->Disconnects.load(), 1);
+        UNIT_ASSERT(!nested);
+    }
+
+    Y_UNIT_TEST(ShutdownIgnoresResolutionCompletingAfterRequestStop)
+    {
+        TFixture f;
+        f.Resolver->Deferred = true;
+        auto handler = std::make_shared<TTestHostHandler>();
+        f.Peers->Start();
+        UNIT_ASSERT(!HasError(
+            f.Peers->RegisterHost("cell-2", 1, "host", 1111, handler)));
+        UNIT_ASSERT_VALUES_EQUAL(f.Resolver->Requests.size(), 1);
+        auto resolved = f.Resolver->Requests[0].Promise;
+        Y_DEFER
+        {
+            resolved.TrySetValue(
+                MakeError(E_UNAVAILABLE, "lookup interrupted"));
+        };
+
+        f.Peers->RequestStop();
+        resolved.SetValue(
+            TVector<NInterconnect::TAddress>{
+                NInterconnect::TAddress("127.0.0.1", 1111)});
+        f.Peers->Stop();
+        f.Retry();
+        UNIT_ASSERT(f.Connector->Requests.empty());
+        UNIT_ASSERT_VALUES_EQUAL(handler->Connects.load(), 0);
+        UNIT_ASSERT_VALUES_EQUAL(handler->Unavailable.load(), 0);
     }
 
     Y_UNIT_TEST(NotifiesHostAboutDisconnectedChannel)
@@ -289,11 +477,8 @@ Y_UNIT_TEST_SUITE(TIcV2PeerConnectionsTest)
         TFixture f;
         auto handler = std::make_shared<TTestHostHandler>();
         f.Peers->Start();
-        UNIT_ASSERT(!HasError(f.Peers->RegisterHost(
-            "cell-2",
-            1,
-            {NInterconnect::TAddress("127.0.0.1", 1111)},
-            handler)));
+        UNIT_ASSERT(!HasError(
+            f.Peers->RegisterHost("cell-2", 1, "127.0.0.1", 1111, handler)));
 
         auto connected = f.Peers->GetHostChannel("cell-2", 1);
         f.Connect();
@@ -301,6 +486,7 @@ Y_UNIT_TEST_SUITE(TIcV2PeerConnectionsTest)
         UNIT_ASSERT(!HasError(Wait(connected).GetError()));
         f.Channels[0]->Close();
         UNIT_ASSERT_VALUES_EQUAL(handler->Disconnects.load(), 1);
+        f.Retry();
 
         auto reconnected = f.Peers->GetHostChannel("cell-2", 1);
         f.Connect(1);
@@ -314,16 +500,10 @@ Y_UNIT_TEST_SUITE(TIcV2PeerConnectionsTest)
     {
         TFixture f;
         f.Peers->Start();
-        UNIT_ASSERT(!HasError(f.Peers->RegisterHost(
-            "cell-2",
-            1,
-            {NInterconnect::TAddress("127.0.0.1", 1111)},
-            {})));
-        UNIT_ASSERT(!HasError(f.Peers->RegisterHost(
-            "cell-2",
-            2,
-            {NInterconnect::TAddress("127.0.0.1", 2222)},
-            {})));
+        UNIT_ASSERT(!HasError(
+            f.Peers->RegisterHost("cell-2", 1, "127.0.0.1", 1111, {})));
+        UNIT_ASSERT(!HasError(
+            f.Peers->RegisterHost("cell-2", 2, "127.0.0.1", 2222, {})));
         auto retired = f.Peers->GetHostChannel("cell-2", 1);
         auto current = f.Peers->GetHostChannel("cell-2", 2);
         UNIT_ASSERT_VALUES_EQUAL(
@@ -344,11 +524,8 @@ Y_UNIT_TEST_SUITE(TIcV2PeerConnectionsTest)
         UNIT_ASSERT(
             f.Peers->GetHostChannel("cell-2", 2).GetValue().GetResult() ==
             f.Channels[0]);
-        UNIT_ASSERT(HasError(f.Peers->RegisterHost(
-            "cell-2",
-            1,
-            {NInterconnect::TAddress("127.0.0.1", 3333)},
-            {})));
+        UNIT_ASSERT(HasError(
+            f.Peers->RegisterHost("cell-2", 1, "127.0.0.1", 3333, {})));
         f.Peers->UnregisterHost("cell-2", 2);
         UNIT_ASSERT(f.Channels[0]->Closing);
     }
@@ -359,19 +536,10 @@ Y_UNIT_TEST_SUITE(TIcV2PeerConnectionsTest)
         config.MutableIcV2()->SetMaxOutgoingConnections(1);
         TFixture f(config);
         f.Peers->Start();
-        UNIT_ASSERT(!HasError(f.Peers->RegisterHost(
-            "cell-2",
-            1,
-            {NInterconnect::TAddress("127.0.0.1", 1111)},
-            {})));
+        UNIT_ASSERT(!HasError(
+            f.Peers->RegisterHost("cell-2", 1, "127.0.0.1", 1111, {})));
         UNIT_ASSERT_VALUES_EQUAL(
-            f.Peers
-                ->RegisterHost(
-                    "cell-2",
-                    2,
-                    {NInterconnect::TAddress("127.0.0.1", 2222)},
-                    {})
-                .GetCode(),
+            f.Peers->RegisterHost("cell-2", 2, "127.0.0.1", 2222, {}).GetCode(),
             E_REJECTED);
         auto retired = f.Peers->GetHostChannel("cell-2", 1);
         f.Connect();
@@ -379,11 +547,8 @@ Y_UNIT_TEST_SUITE(TIcV2PeerConnectionsTest)
         UNIT_ASSERT_VALUES_EQUAL(
             Wait(retired).GetError().GetCode(),
             E_REJECTED);
-        UNIT_ASSERT(!HasError(f.Peers->RegisterHost(
-            "cell-2",
-            2,
-            {NInterconnect::TAddress("127.0.0.1", 2222)},
-            {})));
+        UNIT_ASSERT(!HasError(
+            f.Peers->RegisterHost("cell-2", 2, "127.0.0.1", 2222, {})));
         auto current = f.Peers->GetHostChannel("cell-2", 2);
         f.Hello();
         UNIT_ASSERT(f.Channels.empty());

@@ -5,8 +5,10 @@
 #include <cloud/blockstore/libs/cells/iface/public.h>
 #include <cloud/blockstore/libs/icv2/iface/host_connection.h>
 
+#include <cloud/storage/core/libs/common/endpoint_handler.h>
 #include <cloud/storage/core/libs/icv2/handshake/handshake.h>
 #include <cloud/storage/core/libs/icv2/request_channel/request_channel.h>
+#include <cloud/storage/core/libs/icv2/tcp/address_resolver.h>
 #include <cloud/storage/core/libs/icv2/tcp/connector.h>
 
 namespace NCloud::NBlockStore::NIcV2 {
@@ -22,25 +24,24 @@ using TChannelFuture = NThreading::TFuture<TChannelResult>;
 using TChannelFactory =
     std::function<TChannelResult(const NCloud::NIcV2::THandshakeReady&)>;
 
-// Internal outgoing-channel cache. The factory must return a prepared channel;
-// the cache installs its close handler before activating it.
+// Start once; Stop externally before releasing the owner reference.
+// The channel factory must return an inactive channel.
 struct IPeerConnections: public IStartable
 {
-    // Concurrent callers share one attempt, its deadline and its future. The
-    // configured HandshakeTimeoutMs covers TCP attempts, hello and activation.
-    // An established channel is reused until it closes. No background retries
-    // and no resending of requests: the next call starts a new attempt.
-    // Callers enforce their own request deadlines, including time spent here.
+    // Reuses an open channel or shares one connection attempt for this cell.
+    // HandshakeTimeoutMs covers TCP, hello and activation. A new call retries
+    // a failed attempt. Callers enforce their own request deadlines.
     virtual TChannelFuture GetChannel(const TString& cellId) = 0;
 
-    // A data binding owns a distinct entry. Addresses belong to one selected
-    // host; only IP addresses of that host may be tried. No cross-host retry.
+    // A data binding connects and retries in the background, including DNS.
+    // Only addresses of the selected host may be tried. No cross-host retry.
     // Binding IDs must increase across registrations and must never be reused.
     virtual NProto::TError RegisterHost(
         const TString& cellId,
         ui64 bindingId,
-        TVector<NInterconnect::TAddress> addresses,
-        IHostConnectionHandlerPtr handler) = 0;
+        TString host,
+        ui16 port,
+        IClientEndpointHandlerPtr handler) = 0;
     virtual TChannelFuture GetHostChannel(
         const TString& cellId,
         ui64 bindingId) = 0;
@@ -52,26 +53,25 @@ struct IPeerConnections: public IStartable
     // callbacks cannot recreate its entry or affect another binding.
     virtual void UnregisterHost(const TString& cellId, ui64 bindingId) = 0;
 
-    // Callback-safe. Rejects pending attempts and closes cached channels.
-    // Stop is external-thread-only: joins connector/hello workers and waits for
-    // admitted result continuations and channel callbacks. Neither callbacks
-    // nor continuations may throw, wait for Stop or destroy the cache. The
-    // owner must keep a strong reference until Stop returns.
+    // Callback-safe shutdown request. External Stop waits for callbacks;
+    // keep the cache alive until it returns. Callbacks must not throw.
     virtual void RequestStop() = 0;
 };
 
 using IPeerConnectionsPtr = std::shared_ptr<IPeerConnections>;
 
-// Resolves configured Hosts.Fqdn synchronously during creation, before workers
-// start. All resolved addresses are tried in configuration/resolver order.
-// An absent/zero IcV2Port leaves that peer unavailable for outgoing IC V2.
-// Takes ownership of fresh connector/handshake workers and their lifecycle.
-// The completion executor belongs to the caller; it must process tasks until
-// Stop completes. The channel factory runs on a connector/hello callback
-// thread.
+// Resolves configured cell hosts during creation; RegisterHost resolves in
+// background. Pass fresh connector/handshake workers; the cache manages their
+// Start/Stop. Keep the resolver and completion executor running until cache
+// Stop returns.
 TResultOrError<IPeerConnectionsPtr> CreatePeerConnections(
-    NCells::TCellsConfigConstPtr config, IConnectorPtr connector,
-    NCloud::NIcV2::IHandshakeProviderPtr handshake, ITimerPtr timer, ITaskQueuePtr completions,
+    NCells::TCellsConfigConstPtr config,
+    IConnectorPtr connector,
+    NCloud::NIcV2::IHandshakeProviderPtr handshake,
+    ITimerPtr timer,
+    ISchedulerPtr scheduler,
+    NCloud::NIcV2::IAddressResolverPtr resolver,
+    ITaskQueuePtr completions,
     TChannelFactory createChannel);
 
 }   // namespace NCloud::NBlockStore::NIcV2

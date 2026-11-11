@@ -262,6 +262,25 @@ bool IsAvailable()
     return true;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+
+class TDataConnectionHandler final: public IClientEndpointHandler
+{
+public:
+    NThreading::TPromise<void> Connected = NThreading::NewPromise();
+
+    void HandleConnected() noexcept override
+    {
+        Connected.TrySetValue();
+    }
+
+    void HandleDisconnected() noexcept override
+    {}
+
+    void HandleUnavailable() noexcept override
+    {}
+};
+
 }   // namespace
 
 Y_UNIT_TEST_SUITE(TIcV2ServiceTest)
@@ -467,6 +486,116 @@ Y_UNIT_TEST_SUITE(TIcV2ServiceTest)
             UNIT_ASSERT(HasError(rejected.GetValue()));
         }
     }
+    Y_UNIT_TEST(ConnectsDataEndpointBeforeAnyIo)
+    {
+        if (!IsAvailable()) {
+            return;
+        }
+
+        TFixture first;
+        TFixture second;
+        StartPair(first, second, false);
+        auto handler = std::make_shared<TDataConnectionHandler>();
+        IDataEndpointFactoryPtr factory = first.Service;
+        auto [endpoint, error] =
+            factory->CreateDataEndpoint("cell-2", "127.0.0.1", handler);
+        UNIT_ASSERT_C(!HasError(error), FormatError(error));
+        UNIT_ASSERT(handler->Connected.GetFuture().Wait(TDuration::Seconds(5)));
+        const auto status = factory->GetDataEndpointStatus(endpoint);
+        UNIT_ASSERT(status.State == EHostChannelState::Connected);
+        UNIT_ASSERT_VALUES_EQUAL(status.ConnectionAttempts, 1);
+        endpoint->Stop();
+    }
+
+    Y_UNIT_TEST(ReleasedEndpointStillDrainsItsResultCallbackDuringServiceStop)
+    {
+        if (!IsAvailable()) {
+            return;
+        }
+
+        TFixture first;
+        TFixture second;
+        auto storageEntered = NThreading::NewPromise();
+        auto storageDone =
+            NThreading::NewPromise<NProto::TZeroBlocksResponse>();
+        second.DataService->ZeroBlocksHandler =
+            [storageEntered, storageDone](auto request) mutable
+        {
+            Y_UNUSED(request);
+
+            storageEntered.SetValue();
+            return storageDone.GetFuture();
+        };
+        StartPair(first, second, false);
+        auto [endpoint, error] =
+            first.Service->CreateDataEndpoint("cell-2", "127.0.0.1", {});
+        UNIT_ASSERT_C(!HasError(error), FormatError(error));
+        const std::weak_ptr<IBlockStore> weak = endpoint;
+        auto zero = std::make_shared<NProto::TZeroBlocksRequest>();
+        zero->SetDiskId("disk");
+        zero->SetBlocksCount(1);
+        zero->MutableHeaders()->SetRequestTimeout(5000);
+        auto response =
+            endpoint->ZeroBlocks(MakeIntrusive<TCallContext>(), zero);
+        auto subscribed = NThreading::NewPromise();
+        auto released = NThreading::NewPromise();
+        auto release = NThreading::NewPromise();
+        auto stopEntered = NThreading::NewPromise();
+        std::future<void> subscribing;
+        std::future<void> completing;
+        std::future<void> stopping;
+        Y_DEFER
+        {
+            release.TrySetValue();
+            storageDone.TrySetValue(NProto::TZeroBlocksResponse{});
+        };
+
+        UNIT_ASSERT(storageEntered.GetFuture().Wait(TDuration::Seconds(5)));
+        subscribing = std::async(
+            std::launch::async,
+            [endpoint = std::move(endpoint),
+             response,
+             subscribed,
+             released,
+             release]() mutable
+            {
+                response.Subscribe(
+                    [endpoint = std::move(endpoint), released, release](
+                        const auto& completed) mutable
+                    {
+                        Y_UNUSED(completed);
+
+                        endpoint.reset();
+                        released.SetValue();
+                        release.GetFuture().GetValueSync();
+                    });
+                subscribed.SetValue();
+            });
+        UNIT_ASSERT(subscribed.GetFuture().Wait(TDuration::Seconds(5)));
+        subscribing.get();
+        completing = std::async(
+            std::launch::async,
+            [storageDone]() mutable
+            { storageDone.SetValue(NProto::TZeroBlocksResponse{}); });
+        UNIT_ASSERT(released.GetFuture().Wait(TDuration::Seconds(5)));
+        UNIT_ASSERT(weak.expired());
+        stopping = std::async(
+            std::launch::async,
+            [service = first.Service, stopEntered]() mutable
+            {
+                stopEntered.SetValue();
+                service->Stop();
+            });
+        UNIT_ASSERT(stopEntered.GetFuture().Wait(TDuration::Seconds(5)));
+        const auto status = stopping.wait_for(50ms);
+        release.SetValue();
+        UNIT_ASSERT(status == std::future_status::timeout);
+        UNIT_ASSERT(stopping.wait_for(5s) == std::future_status::ready);
+        stopping.get();
+        completing.get();
+        UNIT_ASSERT(response.Wait(TDuration::Seconds(5)));
+    }
+
     Y_UNIT_TEST(StopWaitsForAdmittedStorageOperation)
     {
         if (!IsAvailable()) {
@@ -781,6 +910,8 @@ Y_UNIT_TEST_SUITE(TIcV2ServiceTest)
             NCloud::NIcV2::NTests::CreateTestConnector(),
             std::move(hello),
             fixture.Timer,
+            fixture.Scheduler,
+            NCloud::NIcV2::CreateAddressResolver(CreateTaskQueueStub()),
             CreateTaskQueueStub(),
             [&](const THandshakeReady& connection)
             {

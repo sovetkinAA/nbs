@@ -135,11 +135,18 @@ struct TTestPeers final: IPeerConnections
     }
 
     NProto::TError RegisterHost(
-        const TString&,
-        ui64,
-        TVector<NInterconnect::TAddress>,
-        IHostConnectionHandlerPtr) override
+        const TString& cellId,
+        ui64 bindingId,
+        TString host,
+        ui16 port,
+        IClientEndpointHandlerPtr handler) override
     {
+        Y_UNUSED(cellId);
+        Y_UNUSED(bindingId);
+        Y_UNUSED(host);
+        Y_UNUSED(port);
+        Y_UNUSED(handler);
+
         return {};
     }
 
@@ -185,7 +192,8 @@ struct TFixture
         auto [host, error] = CreateHostDataEndpoint(
             "cell-2",
             1,
-            {},
+            "host",
+            1234,
             {},
             Peers,
             Timer,

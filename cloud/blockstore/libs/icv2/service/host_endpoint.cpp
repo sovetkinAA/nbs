@@ -100,8 +100,9 @@ public:
 TResultOrError<THostDataEndpoint> CreateHostDataEndpoint(
     const TString& cellId,
     ui64 bindingId,
-    TVector<NInterconnect::TAddress> addresses,
-    IHostConnectionHandlerPtr handler,
+    TString host,
+    ui16 port,
+    IClientEndpointHandlerPtr handler,
     IPeerConnectionsPtr peers,
     ITimerPtr timer,
     ISchedulerPtr scheduler,
@@ -111,7 +112,8 @@ TResultOrError<THostDataEndpoint> CreateHostDataEndpoint(
     auto error = peers->RegisterHost(
         cellId,
         bindingId,
-        std::move(addresses),
+        std::move(host),
+        port,
         std::move(handler));
     if (HasError(error)) {
         return error;

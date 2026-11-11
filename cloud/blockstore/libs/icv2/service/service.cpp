@@ -13,6 +13,7 @@
 #include <cloud/storage/core/libs/diagnostics/logging.h>
 #include <cloud/storage/core/libs/icv2/handshake/handshake.h>
 #include <cloud/storage/core/libs/icv2/request_channel/request_channel.h>
+#include <cloud/storage/core/libs/icv2/tcp/address_resolver.h>
 #include <cloud/storage/core/libs/icv2/tcp/listener.h>
 
 #include <contrib/ydb/library/actors/interconnect/interconnect_common.h>
@@ -78,6 +79,7 @@ struct TServiceState: public std::enable_shared_from_this<TServiceState>
     TLog Log;
     const ITaskQueuePtr Completions;
     const ITaskQueuePtr DataExecutor;
+    const ITaskQueuePtr ResolverExecutor;
     IDataTargetPtr DataTarget;
     bool Running = false;
     ui64 NextDataBindingId = 1;
@@ -126,6 +128,7 @@ struct TServiceState: public std::enable_shared_from_this<TServiceState>
         , DataExecutor(CreateThreadPool(
               "ICV2Data",
               Config->GetCellsConfig().GetIcV2().GetDataWorkers()))
+        , ResolverExecutor(CreateThreadPool("ICV2Resolve", 2))
         , AcceptedConnections(counters->GetCounter("AcceptedConnections", true))
         , RejectedConnections(counters->GetCounter("RejectedConnections", true))
         , ListenerErrors(counters->GetCounter("ListenerErrors", true))
@@ -424,7 +427,7 @@ public:
     TResultOrError<IBlockStorePtr> CreateDataEndpoint(
         const TString& cellId,
         const TString& host,
-        IHostConnectionHandlerPtr handler) override
+        IClientEndpointHandlerPtr handler) override
     {
         const auto it = State->Config->GetCells().find(cellId);
         if (it == State->Config->GetCells().end() ||
@@ -434,25 +437,6 @@ public:
             return MakeError(
                 E_ARGUMENT,
                 "invalid IC V2 data host or cell port");
-        }
-        TVector<NInterconnect::TAddress> addresses;
-        try {
-            TNetworkAddress resolved(host, it->second->GetIcV2Port());
-            for (auto address = resolved.Begin(); address != resolved.End();
-                 ++address)
-            {
-                if (address->ai_family == AF_INET ||
-                    address->ai_family == AF_INET6)
-                {
-                    NAddr::TAddrInfo remote(&*address);
-                    addresses.emplace_back(remote);
-                }
-            }
-        } catch (const yexception& e) {
-            return MakeError(
-                E_FAIL,
-                TStringBuilder()
-                    << "IC V2 host resolution failed: " << e.what());
         }
         std::lock_guard guard(State->Mutex);
         if (!State->Running || State->Stopping) {
@@ -477,7 +461,8 @@ public:
         auto [binding, error] = CreateHostDataEndpoint(
             cellId,
             id,
-            std::move(addresses),
+            host,
+            static_cast<ui16>(it->second->GetIcV2Port()),
             std::move(handler),
             State->Peers,
             State->Timer,
@@ -526,6 +511,7 @@ public:
         Y_ABORT_UNLESS(!Started && !Stopped);
         State->Completions->Start();
         State->DataExecutor->Start();
+        State->ResolverExecutor->Start();
         State->Handshake->Start();
         State->Peers->Start();
         State->Pings->Start();
@@ -569,6 +555,7 @@ public:
             channel->Close();
         }
         State->Peers->Stop();
+        State->ResolverExecutor->Stop();
         State->Transport->Stop();
         for (const auto& channel: channels) {
             channel->WhenClosed().GetValueSync();
@@ -702,6 +689,8 @@ TResultOrError<IServicePtr> CreateService(
         std::move(connector),
         std::move(outgoingHello),
         state->Timer,
+        state->Scheduler,
+        NCloud::NIcV2::CreateAddressResolver(state->ResolverExecutor),
         state->Completions,
         [weak](const THandshakeReady& connection) -> TChannelResult
         {

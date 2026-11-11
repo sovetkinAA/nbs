@@ -9,12 +9,11 @@ namespace NCloud::NBlockStore::NIcV2 {
 struct THostDataEndpoint
 {
     IDataEndpointPtr Endpoint;
-    // Retained by the service even after the endpoint is destroyed: a result
-    // queued on its executor must finish before that executor can stop.
+    // Wait after endpoint destruction before stopping the result executor.
     NThreading::TFuture<void> Closed;
 };
 
-// The caller resolves exactly one host and assigns a unique, never reused
+// The caller selects one host and assigns a unique, never reused
 // binding ID. Endpoint destruction unregisters only this binding.
 // Connection loss, TCP errors and EOF during hello become E_UNAVAILABLE;
 // attempt deadlines remain E_TIMEOUT, admission overload is E_REJECTED and
@@ -27,8 +26,9 @@ struct THostDataEndpoint
 TResultOrError<THostDataEndpoint> CreateHostDataEndpoint(
     const TString& cellId,
     ui64 bindingId,
-    TVector<NInterconnect::TAddress> addresses,
-    IHostConnectionHandlerPtr handler,
+    TString host,
+    ui16 port,
+    IClientEndpointHandlerPtr handler,
     IPeerConnectionsPtr peers,
     ITimerPtr timer,
     ISchedulerPtr scheduler,

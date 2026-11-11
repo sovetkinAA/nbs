@@ -11,6 +11,7 @@
 #include <cloud/blockstore/libs/config/blockstore_config_management.h>
 #include <cloud/blockstore/libs/config/blockstore_config_provider_private.h>
 #include <cloud/blockstore/libs/config/opaque_config_parser.h>
+#include <cloud/blockstore/libs/config/sections_processing.h>
 #include <cloud/blockstore/libs/diagnostics/block_digest.h>
 #include <cloud/blockstore/libs/diagnostics/config.h>
 #include <cloud/blockstore/libs/diagnostics/critical_events.h>
@@ -110,6 +111,27 @@ using namespace NActors;
 namespace {
 
 ////////////////////////////////////////////////////////////////////////////////
+
+// Report startup section issues through the bootstrap log and describe the
+// static fallback for every rejected dynamic section.
+void ReportStartupConfigSectionsIssues(
+    const TConfigSectionsPreparationIssues& preparationIssues,
+    TLog& Log)
+{
+    for (const auto& section: preparationIssues.Sections) {
+        // Log compatible skips independently of a possible section rejection.
+        for (const auto& issue: section.Issues) {
+            STORAGE_WARN(issue);
+        }
+        if (HasError(section.RejectionError)) {
+            ReportDynamicConfigError(
+                TStringBuilder()
+                << FormatConfigSectionRejection(section)
+                << ". Using static configuration for section " << section.Path
+                << ".");
+        }
+    }
+}
 
 NCloud::NStorage::NRdma::TClientConfigPtr CreateRdmaClientConfig(
     const NRdma::TRdmaConfig& config)
@@ -435,6 +457,7 @@ void TBootstrapYdb::InitConfigs()
     ConfigInitializer->InitComputeClientConfig();
     ConfigInitializer->InitCellsConfig();
     ConfigInitializer->InitLocalNVMeConfig();
+    ConfigInitializer->InitVolumeThrottlingConfig();
 }
 
 void TBootstrapYdb::InitSpdk()
@@ -638,6 +661,9 @@ void TBootstrapYdb::InitKikimrService()
                     << error.GetMessage()
                     << ". Starting without PrivateDatabaseConfig.");
             } else {
+                const auto preparationIssues =
+                    PrepareDynamicConfigSections(config, nullptr);
+                ReportStartupConfigSectionsIssues(preparationIssues, Log);
                 cmsBlockstoreConfig = std::move(config);
             }
         }

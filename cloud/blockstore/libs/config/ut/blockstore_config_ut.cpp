@@ -14,6 +14,8 @@
 #include <util/generic/scope.h>
 #include <util/generic/vector.h>
 
+#include <google/protobuf/unknown_field_set.h>
+
 #include <atomic>
 #include <thread>
 #include <utility>
@@ -338,13 +340,13 @@ Y_UNIT_TEST_SUITE(TBlockstoreConfigTest)
         UNIT_ASSERT_VALUES_EQUAL(400, static_cast<i64>(control));
     }
 
-    // Check that the aggregate proto contains 19 top-level configuration
+    // Check that the aggregate proto contains 20 top-level configuration
     // sections, including the representative sections below.
     Y_UNIT_TEST(ShouldExposeCompleteAggregateSchema)
     {
         const auto* descriptor = NProto::TBlockstoreConfig::descriptor();
 
-        UNIT_ASSERT_VALUES_EQUAL(19, descriptor->field_count());
+        UNIT_ASSERT_VALUES_EQUAL(20, descriptor->field_count());
 
         // Selective check
         UNIT_ASSERT(descriptor->FindFieldByName("Server"));
@@ -521,87 +523,6 @@ root_kms: {address: kms}
         UNIT_ASSERT_VALUES_EQUAL(
             "dynamic",
             result.GetFeatures().GetFeatures(1).GetName());
-    }
-
-    // Merge Features with repeated names. Check that the first record in each
-    // source is used, a dynamic record fully replaces the same-name static
-    // record, and runtime lookups use only the resulting records.
-    Y_UNIT_TEST(ShouldReplaceStaticFeaturesWithDynamicFeatures)
-    {
-        NProto::TBlockstoreConfig staticConfig;
-        auto* staticA =
-            AddFeature(staticConfig, "A", "static-A", "static-A-cloud");
-        staticA->SetCloudProbability(1);
-        AddFeature(staticConfig, "B", "static-B", "static-B-cloud");
-        AddFeature(
-            staticConfig,
-            "B",
-            "duplicate-static-B",
-            "duplicate-static-B-cloud");
-
-        NProto::TBlockstoreConfig dynamicConfig;
-        AddFeature(dynamicConfig, "A", "dynamic-A", "dynamic-A-cloud");
-        AddFeature(dynamicConfig, "C", "dynamic-C", "dynamic-C-cloud");
-        AddFeature(
-            dynamicConfig,
-            "C",
-            "duplicate-dynamic-C",
-            "duplicate-dynamic-C-cloud");
-
-        const auto result = MergeBlockstoreConfigSources(
-            staticConfig,
-            dynamicConfig);
-
-        UNIT_ASSERT_VALUES_EQUAL(3, result.GetFeatures().FeaturesSize());
-
-        const auto& mergedA = result.GetFeatures().GetFeatures(0);
-        UNIT_ASSERT_VALUES_EQUAL("A", mergedA.GetName());
-        UNIT_ASSERT_VALUES_EQUAL("dynamic-A", mergedA.GetValue());
-        UNIT_ASSERT(!mergedA.HasCloudProbability());
-        UNIT_ASSERT_VALUES_EQUAL(1, mergedA.GetWhitelist().CloudIdsSize());
-        UNIT_ASSERT_VALUES_EQUAL(
-            "dynamic-A-cloud",
-            mergedA.GetWhitelist().GetCloudIds(0));
-
-        const auto& mergedB = result.GetFeatures().GetFeatures(1);
-        UNIT_ASSERT_VALUES_EQUAL("B", mergedB.GetName());
-        UNIT_ASSERT_VALUES_EQUAL("static-B", mergedB.GetValue());
-
-        const auto& mergedC = result.GetFeatures().GetFeatures(2);
-        UNIT_ASSERT_VALUES_EQUAL("C", mergedC.GetName());
-        UNIT_ASSERT_VALUES_EQUAL("dynamic-C", mergedC.GetValue());
-
-        const auto config = MakeStartupBlockstoreConfig(
-            staticConfig,
-            dynamicConfig,
-            std::make_shared<NStorage::TStorageConfigControls>());
-        const auto& runtimeFeatures = *config->GetFeaturesConfig();
-
-        UNIT_ASSERT_VALUES_EQUAL(
-            result.GetFeatures().SerializeAsString(),
-            runtimeFeatures.GetConfigProto().SerializeAsString());
-
-        UNIT_ASSERT(
-            runtimeFeatures.IsFeatureEnabled("dynamic-A-cloud", {}, {}, "A"));
-        UNIT_ASSERT_VALUES_EQUAL(
-            "dynamic-A",
-            runtimeFeatures.GetFeatureValue("dynamic-A-cloud", {}, {}, "A"));
-        UNIT_ASSERT(
-            !runtimeFeatures.IsFeatureEnabled("static-A-cloud", {}, {}, "A"));
-        UNIT_ASSERT(
-            !runtimeFeatures.IsFeatureEnabled("other-cloud", {}, {}, "A"));
-
-        UNIT_ASSERT(
-            runtimeFeatures.IsFeatureEnabled("static-B-cloud", {}, {}, "B"));
-        UNIT_ASSERT(
-            !runtimeFeatures
-                 .IsFeatureEnabled("duplicate-static-B-cloud", {}, {}, "B"));
-
-        UNIT_ASSERT(
-            runtimeFeatures.IsFeatureEnabled("dynamic-C-cloud", {}, {}, "C"));
-        UNIT_ASSERT(
-            !runtimeFeatures
-                 .IsFeatureEnabled("duplicate-dynamic-C-cloud", {}, {}, "C"));
     }
 
     // Set the ICB value to 100 and rebuild the config with default 300. Check
@@ -1221,6 +1142,7 @@ root_kms: {address: kms}
                 config.GetDiscoveryService().GetConductorSecureInstancePort());
         }
     }
+
 }
 
 }   // namespace NCloud::NBlockStore

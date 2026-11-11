@@ -401,7 +401,8 @@ public:
         if (storageConfig->GetVolumeThrottlingManagerEnabled()) {
             auto volumeThrottlingManagerService = CreateVolumeThrottlingManager(
                 storageConfig
-                    ->GetVolumeThrottlingManagerNotificationPeriodSeconds());
+                    ->GetVolumeThrottlingManagerNotificationPeriodSeconds(),
+                config->GetVolumeThrottlingConfig());
 
             setup->LocalServices.emplace_back(
                 MakeVolumeThrottlingManagerServiceId(),

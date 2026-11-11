@@ -1,12 +1,3 @@
-/*******************************************************************************
-
-Each accepted PrivateDatabaseConfig replaces the previous YAML source and
-is applied to the static configuration saved before CMS.
-Parser failures preserve the published configuration. An empty or absent
-section clears dynamic overrides; equivalent inputs do not republish.
-
-*******************************************************************************/
-
 #include "configs_manager.h"
 
 #include "configs_manager_renderer.h"
@@ -14,6 +5,7 @@ section clears dynamic overrides; equivalent inputs do not republish.
 
 #include <cloud/blockstore/libs/config/blockstore_config_management.h>
 #include <cloud/blockstore/libs/config/opaque_config_parser.h>
+#include <cloud/blockstore/libs/config/sections_processing.h>
 #include <cloud/blockstore/libs/kikimr/components.h>
 
 #include <cloud/storage/core/libs/actors/helpers.h>
@@ -66,6 +58,36 @@ void ReportConfigUpdateError(
                    "configuration is kept only in memory and will be lost "
                    "after a restart.")
                 : ""));
+}
+
+// Report each section's issues and collect every rejection for monitoring.
+TString ReportConfigSectionsIssues(
+    const TConfigSectionsPreparationIssues& preparationIssues,
+    const TActorContext& ctx)
+{
+    TString rejectedSectionsReason;
+    for (const auto& section: preparationIssues.Sections) {
+        // Keep nonfatal skips visible even if another rule rejects the section.
+        for (const auto& issue: section.Issues) {
+            LOG_WARN_S(ctx, TBlockStoreComponents::CONFIGS_MANAGER, issue);
+        }
+        if (!HasError(section.RejectionError)) {
+            continue;
+        }
+
+        // Report each rejection and preserve their order in the monitoring text.
+        const auto reason = FormatConfigSectionRejection(section);
+        if (!rejectedSectionsReason.empty()) {
+            rejectedSectionsReason += "; ";
+        }
+        rejectedSectionsReason += reason;
+        ReportDynamicConfigError(
+            TStringBuilder()
+            << reason << ". Keeping the last accepted dynamic " << section.Path
+            << " section. Fix or roll back the configuration before restarting "
+               "NBS: the retained section is kept only in memory.");
+    }
+    return rejectedSectionsReason;
 }
 
 class TConfigsManagerActor final
@@ -291,6 +313,8 @@ void TConfigsManagerActor::Handle(
     NProto::TBlockstoreConfig newDynamicConfig;
     NConfig::TRuntimeConfigDiagnostics diagnostics;
     IBlockstoreConfigPtr newConfig;
+    TConfigSectionsPreparationIssues preparationIssues;
+    TString rejectedSectionsReason;
 
     // Prepare the complete update before changing the publication or live
     // controls, so an exception leaves the last accepted state intact.
@@ -317,6 +341,13 @@ void TConfigsManagerActor::Handle(
                 return;
             }
 
+            preparationIssues = PrepareDynamicConfigSections(
+                config,
+                &DynamicConfig);
+            rejectedSectionsReason = ReportConfigSectionsIssues(
+                preparationIssues,
+                ctx);
+
             newDynamicConfig = std::move(config);
         }
 
@@ -330,10 +361,14 @@ void TConfigsManagerActor::Handle(
                 "PrivateDatabaseConfig is unchanged; skipping publication");
             ConfigRenderer.Data.DynamicConfigPresent =
                 message->OpaqueConfigs.contains(PrivateDatabaseConfigKind);
-            // Treat an identical first delivery as startup even if the CMS
-            // version is newer. This is acceptable: the label still describes
-            // the configuration values applied at startup.
-            if (ConfigRenderer.Data.UpdateStatus !=
+            // Preserve section errors on repeats; retain the startup label only
+            // for a fully accepted identical first delivery.
+            if (preparationIssues.HasRejectedSections()) {
+                ConfigRenderer.Data.LastUpdateTime = ctx.Now();
+                ConfigRenderer.Data.UpdateStatus =
+                    EConfigUpdateStatus::RuntimePartiallyApplied;
+            } else if (
+                ConfigRenderer.Data.UpdateStatus !=
                     EConfigUpdateStatus::Startup ||
                 ev->Cookie != *ConfigRenderer.Data.StartupDeliveryCookie)
             {
@@ -341,7 +376,8 @@ void TConfigsManagerActor::Handle(
                 ConfigRenderer.Data.UpdateStatus =
                     EConfigUpdateStatus::RuntimeUnchanged;
             }
-            ConfigRenderer.Data.RejectedUpdateReason.clear();
+            ConfigRenderer.Data.RejectedUpdateReason =
+                std::move(rejectedSectionsReason);
             ReplyConfigNotificationResponse(ev, ctx);
             return;
         }
@@ -374,15 +410,22 @@ void TConfigsManagerActor::Handle(
     ConfigRenderer.Data.DynamicConfigPresent =
         message->OpaqueConfigs.contains(PrivateDatabaseConfigKind);
     ConfigRenderer.Data.LastUpdateTime = ctx.Now();
-    ConfigRenderer.Data.UpdateStatus = EConfigUpdateStatus::Runtime;
-    ConfigRenderer.Data.RejectedUpdateReason.clear();
+    ConfigRenderer.Data.UpdateStatus =
+        preparationIssues.HasRejectedSections()
+            ? EConfigUpdateStatus::RuntimePartiallyApplied
+            : EConfigUpdateStatus::Runtime;
+    ConfigRenderer.Data.RejectedUpdateReason =
+        std::move(rejectedSectionsReason);
     ConfigRenderer.Data.RuntimeDiagnostics = std::move(diagnostics);
 
     LOG_INFO_S(
         ctx,
         TBlockStoreComponents::CONFIGS_MANAGER,
-        (DynamicConfig.ByteSizeLong() ? "Accepted PrivateDatabaseConfig"
-                                      : "Reset PrivateDatabaseConfig"));
+        (ConfigRenderer.Data.UpdateStatus ==
+                 EConfigUpdateStatus::RuntimePartiallyApplied
+             ? "Partially accepted PrivateDatabaseConfig"
+             : (DynamicConfig.ByteSizeLong() ? "Accepted PrivateDatabaseConfig"
+                                             : "Reset PrivateDatabaseConfig")));
 
     // Do not wait for consumers: they read the provider at their safe point
     // and may skip intermediate publications.

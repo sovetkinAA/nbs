@@ -1,10 +1,22 @@
 /*******************************************************************************
 
 The Blockstore dynamic configuration actor API.
-The actor receives PrivateDatabaseConfig through ConfigsDispatcher, applies
-it to the static configuration saved before CMS, and publishes the result.
-Rejected updates leave the published configuration unchanged.
-Created via CreateConfigsManager().
+
+  * The actor receives PrivateDatabaseConfig through ConfigsDispatcher, applies
+    it to the static configuration saved before CMS, and publishes the result.
+
+  * Rejected updates leave the published configuration unchanged.
+
+  * Invalid VolumeThrottling sections retain their previous dynamic value while
+    other valid sections are accepted.
+
+  * Parser failures preserve the published configuration.
+
+  * An empty or absent section clears dynamic overrides.
+
+  * Equivalent inputs do not republish.
+
+  * Created via CreateConfigsManager().
 
 *******************************************************************************/
 

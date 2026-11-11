@@ -50,11 +50,9 @@ void NormalizeDynamicBlockstoreConfig(
     const NProto::TBlockstoreConfig& staticConfig,
     NProto::TBlockstoreConfig& dynamicConfig);
 
-// Merge dynamicConfig into a copy of staticConfig according to protobuf rules,
-// except for Features. Keep the first feature with each name within a source;
-// replace a matching static feature with the complete dynamic record at its
-// position, and append dynamic-only features in their source order.
-// Pass dynamicConfig normalized by NormalizeDynamicBlockstoreConfig().
+// Merge dynamicConfig into a copy of staticConfig using protobuf merging
+// followed by section-specific composition policies; pass normalized dynamic
+// overrides from NormalizeDynamicBlockstoreConfig().
 NProto::TBlockstoreConfig MergeBlockstoreConfigSources(
     const NProto::TBlockstoreConfig& staticConfig,
     const NProto::TBlockstoreConfig& dynamicConfig);

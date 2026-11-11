@@ -8,6 +8,9 @@ SRCS(
     blockstore_config_holder.cpp
     blockstore_config_provider.cpp
     opaque_config_parser.cpp
+    sections_processing.cpp
+    sections_processing/features.cpp
+    sections_processing/volume_throttling.cpp
 )
 
 PEERDIR(
@@ -25,6 +28,7 @@ PEERDIR(
     cloud/blockstore/libs/storage/core
     cloud/blockstore/libs/storage/disk_agent/model
     cloud/blockstore/libs/storage/disk_registry_proxy/model
+    cloud/blockstore/libs/storage/volume_throttling_manager/model
     cloud/blockstore/libs/ydbstats
     cloud/storage/core/libs/common
     cloud/storage/core/libs/config

@@ -8,9 +8,8 @@ the features wrapper created from the merged protobuf configuration.
 
 #include "blockstore_config_management.h"
 
-#include <util/generic/hash.h>
-#include <util/generic/hash_set.h>
-#include <util/generic/vector.h>
+#include "sections_processing.h"
+
 #include <util/system/yassert.h>
 
 namespace NCloud::NBlockStore {
@@ -76,6 +75,9 @@ public:
 
     const TLocalNVMeConfigConstPtr& GetLocalNVMeConfig() const override;
 
+    const TVolumeThrottlingConfigConstPtr&
+    GetVolumeThrottlingConfig() const override;
+
 private:
     const NServer::TServerAppConfigConstPtr ServerConfig;
     const NFeatures::TFeaturesConfigConstPtr FeaturesConfig;
@@ -96,6 +98,7 @@ private:
     const TRootKmsConfigConstPtr RootKmsConfig;
     const NCells::TCellsConfigConstPtr CellsConfig;
     const TLocalNVMeConfigConstPtr LocalNVMeConfig;
+    const TVolumeThrottlingConfigConstPtr VolumeThrottlingConfig;
 };
 
 TBlockstoreConfigImpl::TBlockstoreConfigImpl(
@@ -137,6 +140,9 @@ TBlockstoreConfigImpl::TBlockstoreConfigImpl(
           std::make_shared<NProto::TRootKmsConfig>(config.GetRootKms()))
     , CellsConfig(std::make_shared<NCells::TCellsConfig>(config.GetCells()))
     , LocalNVMeConfig(std::make_shared<TLocalNVMeConfig>(config.GetLocalNVMe()))
+    , VolumeThrottlingConfig(
+          std::make_shared<NProto::TVolumeThrottlingServiceConfig>(
+              config.GetVolumeThrottling()))
 {
     Y_ABORT_UNLESS(FeaturesConfig);
     Y_ABORT_UNLESS(StorageConfig);
@@ -255,54 +261,10 @@ TBlockstoreConfigImpl::GetLocalNVMeConfig() const
     return LocalNVMeConfig;
 }
 
-// Merge feature definitions by name so an overridden feature has one runtime
-// record. Preserve the existing first-wins behavior within each source layer.
-void MergeFeatures(
-    const NCloud::NProto::TFeaturesConfig& staticFeatures,
-    const NCloud::NProto::TFeaturesConfig& dynamicFeatures,
-    NCloud::NProto::TFeaturesConfig* result)
+const TVolumeThrottlingConfigConstPtr&
+TBlockstoreConfigImpl::GetVolumeThrottlingConfig() const
 {
-    // TFeaturesConfig uses the first record when feature names are duplicated.
-    // Preserve this behavior while canonicalizing the static layer.
-    TVector<NCloud::NProto::TFeatureConfig> features;
-    features.reserve(
-        staticFeatures.FeaturesSize() + dynamicFeatures.FeaturesSize());
-
-    THashMap<TString, size_t> featureIndices;
-    for (const auto& feature: staticFeatures.GetFeatures()) {
-        const bool inserted =
-            featureIndices.emplace(feature.GetName(), features.size()).second;
-        if (inserted) {
-            features.push_back(feature);
-        }
-    }
-
-    // Ignore duplicate names after the first one in the dynamic layer. The
-    // first dynamic record replaces the static record or is appended if none
-    // exists.
-    THashSet<TString> dynamicFeatureNames;
-    for (const auto& feature: dynamicFeatures.GetFeatures()) {
-        if (!dynamicFeatureNames.insert(feature.GetName()).second) {
-            continue;
-        }
-
-        const auto it = featureIndices.find(feature.GetName());
-        if (it != featureIndices.end()) {
-            // Replace the complete static record at its original position, so
-            // fields omitted from the dynamic record do not leak from static.
-            features[it->second].CopyFrom(feature);
-        } else {
-            // Append dynamic-only records in their source order.
-            features.push_back(feature);
-        }
-    }
-
-    // Rebuild only the repeated Features field after the enclosing Features
-    // message has been merged, preserving its other and unknown fields.
-    result->ClearFeatures();
-    for (const auto& feature: features) {
-        result->AddFeatures()->CopyFrom(feature);
-    }
+    return VolumeThrottlingConfig;
 }
 
 }   // namespace
@@ -389,25 +351,16 @@ void NormalizeDynamicBlockstoreConfig(
     }
 }
 
-// Merge sources using protobuf rules and the Features overlay by name.
 NProto::TBlockstoreConfig MergeBlockstoreConfigSources(
     const NProto::TBlockstoreConfig& staticConfig,
     const NProto::TBlockstoreConfig& dynamicConfig)
 {
     auto result = staticConfig;
     result.MergeFrom(dynamicConfig);
-    if (staticConfig.GetFeatures().FeaturesSize() ||
-        dynamicConfig.GetFeatures().FeaturesSize())
-    {
-        MergeFeatures(
-            staticConfig.GetFeatures(),
-            dynamicConfig.GetFeatures(),
-            result.MutableFeatures());
-    }
+    MergeConfigSections(staticConfig, dynamicConfig, result);
     return result;
 }
 
-// Preserve non-protobuf parameters when rebuilding the configuration.
 TBlockstoreConfigExtraParameters GetBlockstoreConfigExtraParameters(
     const IBlockstoreConfig& currentConfig)
 {

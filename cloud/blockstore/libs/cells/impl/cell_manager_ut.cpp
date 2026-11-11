@@ -347,7 +347,7 @@ Y_UNIT_TEST_SUITE(TCellManagerTest)
             testContext.ServerStats,
             CreateClientCertificateProvider(config),
             nullptr,
-            nullptr,
+            {},
             CreateLocalService());
 
         server->Start();
@@ -411,7 +411,7 @@ Y_UNIT_TEST_SUITE(TCellManagerTest)
             testContext.ServerStats,
             CreateClientCertificateProvider(config),
             nullptr,
-            nullptr,
+            {},
             CreateLocalService());
 
         server->Start();
@@ -624,7 +624,7 @@ Y_UNIT_TEST_SUITE(TCellManagerTest)
             testContext.ServerStats,
             CreateClientCertificateProvider(config),
             nullptr,
-            nullptr,
+            {},
             CreateLocalService());
 
         // A cell id we never configured can only come from broken internal
@@ -697,7 +697,7 @@ Y_UNIT_TEST_SUITE(TCellManagerTest)
             testContext.ServerStats,
             CreateClientCertificateProvider(config),
             nullptr,
-            nullptr,
+            {},
             CreateLocalService());
 
         server->Start();
@@ -810,7 +810,7 @@ Y_UNIT_TEST_SUITE(TCellManagerTest)
             testContext.ServerStats,
             CreateClientCertificateProvider(config),
             nullptr,
-            nullptr,
+            {},
             CreateLocalService());
 
         server->Start();
@@ -928,7 +928,7 @@ Y_UNIT_TEST_SUITE(TCellManagerTest)
             testContext.ServerStats,
             CreateClientCertificateProvider(config),
             nullptr,
-            nullptr,
+            {},
             CreateLocalService());
 
         auto cell = testContext.Monitoring->GetCounters()

@@ -131,8 +131,8 @@ NProto::TClientAppConfig CreateClientAppConfig(
 ////////////////////////////////////////////////////////////////////////////////
 
 TCellHostConfig::TCellHostConfig(
-        const NProto::TCellHostConfig& hostConfig,
-        const TCellConfig& cellConfig)
+    const NProto::TCellHostConfig& hostConfig,
+    const TCellConfig& cellConfig)
     : GrpcPort(cellConfig.GetGrpcPort())
     , SecureGrpcPort(cellConfig.GetSecureGrpcPort())
     , RdmaPort(cellConfig.GetRdmaPort())
@@ -140,22 +140,22 @@ TCellHostConfig::TCellHostConfig(
     , Fqdn(hostConfig.GetFqdn())
     , CellId(cellConfig.GetCellId())
     , IcV2Port(cellConfig.GetIcV2Port())
-    , Transport(hostConfig.GetTransport() ?
-        hostConfig.GetTransport():
-        cellConfig.GetTransport())
+    , Transport(
+          hostConfig.GetTransport() ? hostConfig.GetTransport()
+                                    : cellConfig.GetTransport())
     , GrpcDataFallbackEnabled(cellConfig.GetGrpcDataFallbackEnabled())
     , RdmaSettleTime(cellConfig.GetRdmaSettleTime())
 {
 }
 
-const TString& TCellHostConfig::GetCellId() const
-{
-    return CellId;
-}
-
 void TCellHostConfig::SetTransport(NProto::ECellDataTransport transport)
 {
     Transport = transport;
+}
+
+const TString& TCellHostConfig::GetCellId() const
+{
+    return CellId;
 }
 
 ////////////////////////////////////////////////////////////////////////////////

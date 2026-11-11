@@ -147,8 +147,7 @@ TResultOrError<ITransportSwitcherPtr> PrepareBindingTransportSwitching(
     return PrepareTransportSwitching(
         binding.Sink,
         binding.DataEndpoint,
-        [bootstrap, hostConfig]   //
-        (NCloud::IClientEndpointHandlerPtr handler)
+        [bootstrap, hostConfig](NCloud::IClientEndpointHandlerPtr handler)
         {
             return bootstrap.EndpointsSetup->SetupHostRdmaEndpoint(
                 bootstrap,

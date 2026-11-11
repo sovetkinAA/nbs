@@ -32,7 +32,7 @@ private:
     TLog Log;
 
     TAdaptiveLock Lock;
-    IBlockStorePtr Preferred;   // the preferred endpoint, once acquired
+    IBlockStorePtr Preferred;       // the preferred endpoint, once acquired
     bool Active = false;
     bool PreferredActive = false;   // is the router pointing at it
     bool Connected = false;
